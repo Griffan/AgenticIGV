@@ -61,17 +61,6 @@ Region: 20:59000-61000
 Chat: "Analyze the coverage in this region"
 ```
 
-## Tests
-Install dev dependencies:
-
-pip install -r requirements-dev.txt
-
-Run tests:
-
-pytest
-
-Manual browser verification for Edge mode is documented in [docs/EDGE_MODE_QA.md](/home/griffan/LinuxStorage/Download/GitRepos/AgenticIGV/docs/EDGE_MODE_QA.md).
-
 ## Notes
 - The BAM index must exist next to the BAM file (sample.bam.bai or sample.bai).
 - Edge mode requires both `.bam` and `.bai` files loaded in the browser.
