@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agentic IGV</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/igv.min.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="header-content">
+        <h1>Agentic IGV 🧬</h1>
+        <p>Multi-agent BAM alignment browser with LLM-powered chat analysis</p>
+        <div class="status-line">
+          <span id="llmStatus" class="status-tag"></span>
+          <span id="bamStatus" class="status-tag"></span>
+        </div>
+      </div>
+    </header>
+
+    <section class="inputs-panel">
+      <div class="mode-row">
+        <span>Mode</span>
+        <label class="mode-pill">
+          <input type="radio" name="runMode" value="path" checked />
+          <span>Path</span>
+        </label>
+        <label class="mode-pill">
+          <input type="radio" name="runMode" value="edge" />
+          <span>Edge (local files)</span>
+        </label>
+      </div>
+
+      <div id="pathInputs" class="mode-panel">
+      <label>
+        BAM path
+        <input id="bamPath" placeholder="/path/to/alignments.bam" />
+      </label>
+      <label>
+        FASTA Reference (optional)
+        <input id="fastaPath" placeholder="/path/to/reference.fa" />
+      </label>
+      </div>
+
+      <div id="edgeInputs" class="mode-panel hidden">
+        <label>
+          BAM file
+          <input id="edgeBamFile" type="file" accept=".bam" />
+        </label>
+        <label>
+          BAI index file
+          <input id="edgeBaiFile" type="file" accept=".bai" />
+        </label>
+        <label>
+          FASTA reference (optional)
+          <input id="edgeFastaFile" type="file" accept=".fa,.fasta" />
+        </label>
+        <label>
+          FASTA index (optional)
+          <input id="edgeFaiFile" type="file" accept=".fai" />
+        </label>
+        <div id="edgeDropZone" class="drop-zone">Drop BAM/BAI/FASTA files here</div>
+      </div>
+
+      <label>
+        Region (chr:start-end)
+        <input id="region" placeholder="20:59000-61000 or chr20:100-200" />
+        <span id="currentRegionBadge" class="current-region">Current IGV region: not set</span>
+      </label>
+      <button id="loadRegion">Load region</button>
+    </section>
+
+    <main class="layout">
+      <section class="panel tracks">
+        <h2>IGV Browser</h2>
+        <div id="igv-container" class="igv-container"></div>
+      </section>
+
+      <section class="panel chat">
+        <h2>Chat</h2>
+        <div id="svSummary" class="sv-summary hidden">SV: not assessed</div>
+        <div id="messages" class="messages"></div>
+        <div class="composer">
+          <input id="messageInput" placeholder="Ask: 'Load chr20:60000-61000' or 'What's the coverage?' or 'Show mismatches'" />
+          <button id="sendMessage">Send</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/static/igv.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+/* IGV.js minimal styles - main styling comes from styles.css */
+
+.igv-container {
+  position: relative;
+  font-family: Arial, sans-serif;
+}
+
+.igv-track {
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.igv-axis-column {
+  border-right: 1px solid #e0e0e0;
+}
+
+.igv-viewport {
+  overflow: hidden;
+}
+
+.igv-ruler {
+  background-color: #f8f8f8;
+}
+
+.igv-ideogram {
+  background-color: white;
+}
