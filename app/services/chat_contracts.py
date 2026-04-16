@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Literal, Optional
 
 from typing_extensions import TypedDict
@@ -12,6 +13,7 @@ Mode = Literal["path", "edge"]
 
 # Debug flag for observability logging
 DEBUG = os.getenv("AGENTIC_IGV_DEBUG", "0") == "1"
+BAM_PATH_FINDER = re.compile(r"([~\w./-]+\.bam)\b", re.IGNORECASE)
 
 
 class SampleData(TypedDict, total=False):
@@ -53,6 +55,12 @@ class ContractError(ValueError):
     pass
 
 
+def _extract_bam_paths(text: str) -> List[str]:
+    if not text:
+        return []
+    return list(dict.fromkeys(BAM_PATH_FINDER.findall(text)))
+
+
 def _validate_coverage_item(item: Any) -> None:
     if not isinstance(item, dict):
         raise ContractError("coverage items must be objects")
@@ -77,7 +85,16 @@ def normalize_chat_request(request: ChatContract) -> NormalizedChatInput:
     }
 
     if request.mode == "path":
-        normalized["bam_path"] = request.bam_path or ""
+        message_bam_paths = _extract_bam_paths(request.message or "")
+        field_bam_paths = _extract_bam_paths(request.bam_path or "")
+
+        # Prefer BAM paths explicitly mentioned in the message.
+        if message_bam_paths:
+            normalized["bam_path"] = ", ".join(message_bam_paths)
+        elif field_bam_paths:
+            normalized["bam_path"] = ", ".join(field_bam_paths)
+        else:
+            normalized["bam_path"] = request.bam_path or ""
         return normalized
 
     if not (request.region or "").strip():

@@ -73,6 +73,12 @@ def _extract_bam_path(text: str) -> Optional[str]:
     return match.group(1)
 
 
+def _extract_bam_paths(text: str) -> list[str]:
+    matches = BAM_PATH_FINDER.findall(text)
+    # Keep encounter order stable and remove duplicates.
+    return list(dict.fromkeys(matches))
+
+
 def _content_to_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -96,11 +102,32 @@ def intent_agent(state: ChatState) -> ChatState:
         print(f"[DEBUG] intent_agent: message={message}")
     # Try to extract region and BAM path
     region = state.get("region") or _extract_region(message)
-    bam_path = state.get("bam_path") or _extract_bam_path(message)
+
+    # Extract BAMs from both free text message and bam_path field (which may contain multiple paths).
+    extracted_bam_paths = _extract_bam_paths(message)
+    extracted_from_bam_field = _extract_bam_paths(state.get("bam_path", ""))
+    combined_bam_paths = list(dict.fromkeys(extracted_bam_paths + extracted_from_bam_field))
+
+    bam_path = state.get("bam_path") or (combined_bam_paths[0] if combined_bam_paths else None)
     if bam_path:
         state["bam_path"] = bam_path
+    # Materialize bam_tracks from extracted BAM paths when not already provided.
+    if combined_bam_paths and not state.get("bam_tracks"):
+        state["bam_tracks"] = [
+            {
+                "bam_path": path,
+                "sample_name": f"sample_{i}",
+            }
+            for i, path in enumerate(combined_bam_paths, start=1)
+        ]
+    # When multi-track input is available, clear single bam_path to avoid stale/single-path overrides.
+    if state.get("bam_tracks"):
+        state["bam_path"] = ""
     if DEBUG:
-        print(f"[DEBUG] intent_agent: region={region}, bam_path={bam_path}")
+        print(
+            f"[DEBUG] intent_agent: region={region}, bam_path={bam_path}, "
+            f"bam_tracks={len(state.get('bam_tracks', []))}"
+        )
 
     # --- IGV.js parameter extraction and preset support ---
     # Supported IGV.js parameters and their natural-language aliases

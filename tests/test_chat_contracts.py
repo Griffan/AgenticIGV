@@ -286,10 +286,10 @@ class TestMultiBAMEdgePayload:
 
 
 class TestPathMode:
-    """Verify path mode is unchanged."""
+    """Verify path mode normalization and BAM extraction priority."""
     
     def test_path_mode_normalization(self):
-        """Path mode should work as before."""
+        """Path mode should preserve explicit single bam_path."""
         request = ChatContract(
             message="hello",
             mode="path",
@@ -303,3 +303,29 @@ class TestPathMode:
         assert normalized["bam_path"] == "/path/to/test.bam"
         assert normalized["region"] == "chr1:1-100"
         assert "coverage" not in normalized or normalized.get("coverage") is None
+
+    def test_path_mode_prefers_message_bams_over_stale_field(self):
+        """Message BAM list should override stale single bam_path field value."""
+        request = ChatContract(
+            message='Load "/tmp/first.bam" and "/tmp/second.bam" in region chr1:1-100',
+            mode="path",
+            bam_path="/tmp/second.bam",
+            region="chr1:1-100",
+        )
+
+        normalized = normalize_chat_request(request)
+
+        assert normalized["bam_path"] == "/tmp/first.bam, /tmp/second.bam"
+
+    def test_path_mode_uses_all_field_bams_when_message_has_none(self):
+        """If message has no BAMs, parse and normalize comma-separated field BAMs."""
+        request = ChatContract(
+            message="analyze this",
+            mode="path",
+            bam_path="/tmp/first.bam, /tmp/second.bam",
+            region="chr1:1-100",
+        )
+
+        normalized = normalize_chat_request(request)
+
+        assert normalized["bam_path"] == "/tmp/first.bam, /tmp/second.bam"

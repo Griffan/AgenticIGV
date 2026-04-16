@@ -78,6 +78,8 @@ class ChatResponse(BaseModel):
     igv_params: Optional[dict] = None
     igv_feedback: Optional[str] = None
     preset: Optional[str] = None
+    bam_tracks: List[Dict[str, Any]] = Field(default_factory=list)
+    per_track_results: Dict[str, Any] = Field(default_factory=dict)
 
 
 
@@ -253,6 +255,8 @@ def chat(request: ChatRequest) -> ChatResponse:
             igv_params=result.get("igv_params"),
             igv_feedback=result.get("igv_feedback"),
             preset=result.get("preset"),
+            bam_tracks=result.get("bam_tracks", []),
+            per_track_results=result.get("per_track_results", {}),
         )
     except ContractError as exc:
         if DEBUG:

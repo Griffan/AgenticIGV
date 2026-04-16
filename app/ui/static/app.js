@@ -163,6 +163,34 @@ function extractPathFromText(text, extensions) {
   return matches.sort((a, b) => b.length - a.length)[0];
 }
 
+function extractBamPathsFromText(text) {
+  const matches = (text || "").match(/([~\w./-]+\.bam)\b/ig) || [];
+  return [...new Set(matches)];
+}
+
+function buildPathModeTracks(trackSpecs) {
+  const total = Math.max(1, trackSpecs.length);
+  const trackHeight = total > 1 ? Math.max(200, Math.floor(700 / total)) : 500;
+
+  return trackSpecs.map((spec, idx) => ({
+    id: generateTrackId(),
+    type: "alignment",
+    format: "bam",
+    name: spec.sample_name || `sample_${idx + 1}`,
+    height: trackHeight,
+    autoHeight: false,
+    displayMode: "SQUISHED",
+    viewAsPairs: false,
+    showSoftClips: true,
+    url: `/api/file?path=${encodeURIComponent(spec.bam_path)}`,
+    indexURL: `/api/index?bam_path=${encodeURIComponent(spec.bam_path)}`,
+  }));
+}
+
+function isAlignmentLikeTrack(track) {
+  return track?.type === "alignment" || track?.type === "bam";
+}
+
 function updateModeUI() {
   const edge = runMode === "edge";
   pathInputs.classList.toggle("hidden", edge);
@@ -414,16 +442,20 @@ function buildEdgeRegionReference(region) {
   return buildChromosomeReference(`edge-region-${parsed.contig}`, [{ name: parsed.contig, length: inferredLength }]);
 }
 
-function computeSourceKey(region) {
+function computeSourceKey(region, pathModeTracks = null) {
   function fileIdentity(file) {
     if (!file) return "none";
     return `${file.name}:${file.size}:${file.lastModified}`;
   }
 
   if (runMode === "path") {
+    const trackKey = Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+      ? pathModeTracks.map((t) => `${t.sample_name || "sample"}:${t.bam_path || ""}`).join("|")
+      : (bamPathInput.value || "").trim();
+
     return [
       "path",
-      (bamPathInput.value || "").trim(),
+      trackKey,
       (fastaPathInput.value || "").trim(),
     ].join(":");
   }
@@ -454,7 +486,7 @@ function computeSourceKey(region) {
 }
 
 function getAlignmentTrack() {
-  const trackView = (igvBrowser?.trackViews || []).find((tv) => tv?.track?.type === "alignment");
+  const trackView = (igvBrowser?.trackViews || []).find((tv) => isAlignmentLikeTrack(tv?.track));
   return trackView?.track || null;
 }
 
@@ -462,7 +494,7 @@ function getAlignmentTrack() {
 function getAllAlignmentTracks() {
   if (!igvBrowser || !igvBrowser.trackViews) return [];
   return igvBrowser.trackViews
-    .filter(tv => tv?.track?.type === "alignment")
+    .filter(tv => isAlignmentLikeTrack(tv?.track))
     .map(tv => tv.track);
 }
 
@@ -507,9 +539,9 @@ async function waitForAllAlignmentTracksReady(timeoutMs = 3000, intervalMs = 150
   throw new Error(`IGV alignment tracks not all ready. Expected ${expectedTrackCount}, but not all have getFeatures().`);
 }
 
-async function buildReferenceConfig(region) {
+async function buildReferenceConfig(region, pathModePrimaryBamPath = "") {
   if (runMode === "path") {
-    const bamPath = (bamPathInput.value || "").trim();
+    const bamPath = (pathModePrimaryBamPath || bamPathInput.value || "").trim();
     const fastaPath = (fastaPathInput.value || "").trim();
     if (fastaPath) {
       return {
@@ -545,10 +577,10 @@ async function buildReferenceConfig(region) {
   };
 }
 
-async function ensureBrowser(region) {
+async function ensureBrowser(region, pathModeTracks = null) {
   if (!window.igv) throw new Error("IGV.js failed to load.");
 
-  const sourceKey = computeSourceKey(region);
+  const sourceKey = computeSourceKey(region, pathModeTracks);
   if (!sourceKey || sourceKey.endsWith(":")) {
     throw new Error("No BAM source configured for selected mode.");
   }
@@ -567,19 +599,16 @@ async function ensureBrowser(region) {
   let tracks = [];
   
   if (runMode === "path") {
-    const bamPath = (bamPathInput.value || "").trim();
-    tracks = [{
-      type: "alignment",
-      format: "bam",
-      name: "Alignments",
-      height: 500,
-      autoHeight: false,
-      displayMode: "SQUISHED",
-      viewAsPairs: false,
-      showSoftClips: true,
-      url: `/api/file?path=${encodeURIComponent(bamPath)}`,
-      indexURL: `/api/index?bam_path=${encodeURIComponent(bamPath)}`,
-    }];
+    const effectivePathTracks = Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+      ? pathModeTracks.filter((track) => track?.bam_path)
+      : [];
+
+    if (effectivePathTracks.length > 0) {
+      tracks = buildPathModeTracks(effectivePathTracks);
+    } else {
+      const bamPath = (bamPathInput.value || "").trim();
+      tracks = buildPathModeTracks([{ bam_path: bamPath, sample_name: "sample_1" }]);
+    }
   } else {
     // Edge mode: create tracks for all loaded BAMs
     if (edgeFiles.tracks.length === 0) {
@@ -633,11 +662,17 @@ async function ensureBrowser(region) {
     tracks: tracks,
   };
 
-  const referenceConfig = await buildReferenceConfig(region);
+  const primaryPath = runMode === "path" && Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+    ? pathModeTracks[0].bam_path
+    : "";
+  const referenceConfig = await buildReferenceConfig(region, primaryPath);
   if (referenceConfig) {
     options.reference = referenceConfig;
   }
 
+  console.log("[ensureBrowser] sourceKey:", sourceKey);
+  console.log("[ensureBrowser] tracks count:", tracks.length);
+  console.log("[ensureBrowser] tracks:", JSON.stringify(tracks.map(t => ({name: t.name, url: t.url}))));
   igvContainer.innerHTML = "";
   igvBrowser = await igv.createBrowser(igvContainer, options);
 
@@ -840,14 +875,21 @@ async function extractEdgeSignals(region) {
 }
 
 function applyExtractedInputs(message) {
+  const bamPaths = extractBamPathsFromText(message);
   const extracted = {
-    bamPath: extractPathFromText(message, [".bam"]),
+    bamPaths,
+    bamPath: bamPaths.length === 1 ? bamPaths[0] : null,
     fastaPath: extractPathFromText(message, [".fa", ".fasta", ".fa.gz", ".fasta.gz"]),
     region: extractRegionFromText(message),
   };
 
   if (runMode === "path") {
-    if (extracted.bamPath) bamPathInput.value = extracted.bamPath;
+    // For multi-BAM prompts, keep all paths visible instead of collapsing to one.
+    if (bamPaths.length > 1) {
+      bamPathInput.value = bamPaths.join(", ");
+    } else if (extracted.bamPath) {
+      bamPathInput.value = extracted.bamPath;
+    }
     if (extracted.fastaPath) fastaPathInput.value = extracted.fastaPath;
   }
   if (extracted.region) regionInput.value = extracted.region;
@@ -979,6 +1021,12 @@ async function fetchChat() {
   const loadingMsg = appendMessage("Analyzing...", false);
 
   try {
+    const requestedBamPathsFromMessage = extractBamPathsFromText(message);
+    const requestedBamPathsFromInput = extractBamPathsFromText((bamPathInput.value || "").trim());
+    const requestedBamPaths = requestedBamPathsFromMessage.length > 0
+      ? requestedBamPathsFromMessage
+      : requestedBamPathsFromInput;
+
     const payload = {
       message,
       mode: runMode,
@@ -986,7 +1034,16 @@ async function fetchChat() {
     };
 
     if (runMode === "path") {
-      payload.bam_path = (extracted.bamPath || bamPathInput.value || "").trim();
+      const fallbackBamPath = (extracted.bamPath || requestedBamPathsFromInput[0] || bamPathInput.value || "").trim();
+      const rawBamInput = (bamPathInput.value || "").trim();
+      // Priority: explicit BAM paths from current message > parsed BAM input paths > raw input fallback.
+      if (requestedBamPathsFromMessage.length > 0) {
+        payload.bam_path = requestedBamPathsFromMessage.join(", ");
+      } else if (requestedBamPathsFromInput.length > 0) {
+        payload.bam_path = requestedBamPathsFromInput.join(", ");
+      } else {
+        payload.bam_path = rawBamInput || fallbackBamPath;
+      }
       payload.fasta_path = (extracted.fastaPath || fastaPathInput.value || "").trim();
     } else {
       if (!region) throw new Error("Provide a region for Edge mode chat analysis.");
@@ -1035,21 +1092,116 @@ async function fetchChat() {
       regionInput.value = resolvedRegion;
     }
 
-    if (runMode === "path" && resolvedRegion) {
-      const browser = await ensureBrowser(resolvedRegion);
+    if (runMode === "path") {
+      const responseBamTracks = Array.isArray(data.bam_tracks)
+        ? data.bam_tracks
+            .map((track, idx) => ({
+              sample_name: track?.sample_name || `sample_${idx + 1}`,
+              bam_path: track?.bam_path || "",
+            }))
+            .filter((track) => track.bam_path)
+        : [];
+      const trackEntries = Object.entries(data.per_track_results || {});
+      const backendTracks = responseBamTracks.length > 0
+        ? responseBamTracks
+        : trackEntries.length > 0
+        ? trackEntries
+            .map(([sampleName, trackData]) => ({
+              sample_name: sampleName,
+              bam_path: trackData?.bam_path || "",
+            }))
+            .filter((track) => track.bam_path)
+        : [{
+            sample_name: "sample_1",
+            bam_path: payload.bam_path,
+          }].filter((track) => track.bam_path);
+
+      const pathModeTracks = [...backendTracks];
+      const existingPaths = new Set(pathModeTracks.map((track) => track.bam_path));
+      requestedBamPaths.forEach((requestedPath) => {
+        if (!requestedPath || existingPaths.has(requestedPath)) return;
+        pathModeTracks.push({
+          sample_name: `sample_${pathModeTracks.length + 1}`,
+          bam_path: requestedPath,
+        });
+        existingPaths.add(requestedPath);
+      });
+
+      if (pathModeTracks.length === 0) {
+        throw new Error("No BAM tracks available to load in IGV.");
+      }
+
+      console.log("[fetchChat] per_track_results keys:", Object.keys(data.per_track_results || {}));
+      console.log("[fetchChat] pathModeTracks:", JSON.stringify(pathModeTracks));
+      appendMessage(
+        `Track plan: ${pathModeTracks.map((t) => `${t.sample_name}->${t.bam_path}`).join(", ")}`
+      );
+
+      const browser = await ensureBrowser(resolvedRegion, pathModeTracks);
 
       if (data.igv_params && typeof data.igv_params === "object") {
         // Try in-memory re-pair first (works when data is already cached in viewports)
         const needsReload = applyIgvParams(data.igv_params);
-        if (needsReload) {
+        if (needsReload && resolvedRegion) {
           // featureSource already updated; fresh search() will fetch with new setting
           await browser.search(resolvedRegion);
           // After data reloads, apply in-memory re-pair on the freshly loaded containers
           applyIgvParams(data.igv_params);
         }
-      } else {
+      } else if (resolvedRegion) {
         await browser.search(resolvedRegion);
       }
+
+      let allTracks = getAllAlignmentTracks();
+
+      // Fallback: if IGV created fewer tracks than expected, load missing tracks explicitly.
+      if (allTracks.length < pathModeTracks.length && typeof browser.loadTrack === "function") {
+        const perTrackHeight = pathModeTracks.length > 1
+          ? Math.max(200, Math.floor(700 / pathModeTracks.length))
+          : 500;
+
+        for (let i = allTracks.length; i < pathModeTracks.length; i += 1) {
+          const trackSpec = pathModeTracks[i];
+          try {
+            await browser.loadTrack({
+              id: generateTrackId(),
+              type: "alignment",
+              format: "bam",
+              name: trackSpec.sample_name || `sample_${i + 1}`,
+              height: perTrackHeight,
+              autoHeight: false,
+              displayMode: "SQUISHED",
+              viewAsPairs: false,
+              showSoftClips: true,
+              url: `/api/file?path=${encodeURIComponent(trackSpec.bam_path)}`,
+              indexURL: `/api/index?bam_path=${encodeURIComponent(trackSpec.bam_path)}`,
+            });
+          } catch (err) {
+            console.error(`Failed to fallback-load track ${trackSpec.sample_name || i}:`, err);
+          }
+        }
+        allTracks = getAllAlignmentTracks();
+      }
+
+      if (allTracks.length > 0) {
+        pathModeTracks.forEach((trackSpec, index) => {
+          const track = allTracks[index];
+          if (!track) return;
+          track.name = trackSpec.sample_name || track.name;
+          if (track.config) track.config.name = track.name;
+        });
+        if (typeof browser.repaint === "function") {
+          browser.repaint();
+        }
+      }
+
+      if (allTracks.length !== pathModeTracks.length) {
+        appendMessage(`Warning: expected ${pathModeTracks.length} IGV track(s), but found ${allTracks.length}.`);
+      }
+
+      appendMessage(
+        `Visible IGV tracks: ${allTracks.map((t) => t?.name || "(unnamed)").join(", ") || "none"}`
+      );
     }
   } catch (error) {
     loadingMsg.remove();
