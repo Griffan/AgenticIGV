@@ -32,12 +32,89 @@ let igvBrowser = null;
 let currentSourceKey = null;
 let igvLocusListenerBound = false;
 
+// Multi-BAM edge mode structure:
+// edgeFiles.tracks: array of {id, name, bam, bai} for multiple samples
+// edgeFiles.reference: {fasta, fai} for shared reference
 const edgeFiles = {
+  tracks: [],        // Array of track objects for multi-BAM support
+  reference: {
+    fasta: null,
+    fai: null,
+  },
+  // Legacy flat structure for backward compatibility
   bam: null,
   bai: null,
   fasta: null,
   fai: null,
 };
+
+// Helper functions for multi-BAM edge mode
+
+function generateTrackId() {
+  return `track-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function autoNameFromBam(bamFile) {
+  // sample.bam → sample
+  const name = bamFile.name.replace(/\.(bam|BAM)$/, '');
+  return name || 'unnamed';
+}
+
+function findOrCreateTrack(bamFile, baiFile) {
+  // Check if this exact BAM is already loaded
+  const existing = edgeFiles.tracks.find(
+    t => t.bam.name === bamFile.name && t.bam.size === bamFile.size
+  );
+  if (existing) {
+    // Update BAI if provided and different
+    if (baiFile && (!existing.bai || existing.bai.size !== baiFile.size)) {
+      existing.bai = baiFile;
+    }
+    return existing;
+  }
+  
+  // Create new track with auto-naming and conflict resolution
+  const baseName = autoNameFromBam(bamFile);
+  const existingCount = edgeFiles.tracks.filter(t => t.name.startsWith(baseName)).length;
+  const finalName = existingCount > 0 ? `${baseName}-${existingCount}` : baseName;
+  
+  const track = {
+    id: generateTrackId(),
+    name: finalName,
+    bam: bamFile,
+    bai: baiFile || null,
+  };
+  
+  edgeFiles.tracks.push(track);
+  
+  console.log("Edge track created:", {
+    id: track.id,
+    name: track.name,
+    bam_name: track.bam.name,
+    bam_size: track.bam.size,
+    bai_name: track.bai ? track.bai.name : null,
+    bai_size: track.bai ? track.bai.size : null,
+  });
+  
+  return track;
+}
+
+function removeTrack(trackId) {
+  const before = edgeFiles.tracks.length;
+  edgeFiles.tracks = edgeFiles.tracks.filter(t => t.id !== trackId);
+  if (edgeFiles.tracks.length < before) {
+    console.log("Edge track removed:", trackId, `(${edgeFiles.tracks.length} remaining)`);
+  }
+}
+
+function updateTrackName(trackId, newName) {
+  const track = edgeFiles.tracks.find(t => t.id === trackId);
+  if (track) {
+    const oldName = track.name;
+    track.name = newName;
+    console.log("Edge track renamed:", trackId, `${oldName} → ${newName}`);
+  }
+}
 
 function appendMessage(text, isUser = false) {
   const bubble = document.createElement("div");
@@ -86,6 +163,34 @@ function extractPathFromText(text, extensions) {
   return matches.sort((a, b) => b.length - a.length)[0];
 }
 
+function extractBamPathsFromText(text) {
+  const matches = (text || "").match(/([~\w./-]+\.bam)\b/ig) || [];
+  return [...new Set(matches)];
+}
+
+function buildPathModeTracks(trackSpecs) {
+  const total = Math.max(1, trackSpecs.length);
+  const trackHeight = total > 1 ? Math.max(200, Math.floor(700 / total)) : 500;
+
+  return trackSpecs.map((spec, idx) => ({
+    id: generateTrackId(),
+    type: "alignment",
+    format: "bam",
+    name: spec.sample_name || `sample_${idx + 1}`,
+    height: trackHeight,
+    autoHeight: false,
+    displayMode: "SQUISHED",
+    viewAsPairs: false,
+    showSoftClips: true,
+    url: `/api/file?path=${encodeURIComponent(spec.bam_path)}`,
+    indexURL: `/api/index?bam_path=${encodeURIComponent(spec.bam_path)}`,
+  }));
+}
+
+function isAlignmentLikeTrack(track) {
+  return track?.type === "alignment" || track?.type === "bam";
+}
+
 function updateModeUI() {
   const edge = runMode === "edge";
   pathInputs.classList.toggle("hidden", edge);
@@ -95,6 +200,11 @@ function updateModeUI() {
 function setMode(mode) {
   runMode = mode === "edge" ? "edge" : "path";
   if (runMode === "path") {
+    // Clear all edge tracks and reference files
+    edgeFiles.tracks = [];
+    edgeFiles.reference.fasta = null;
+    edgeFiles.reference.fai = null;
+    // Also clear legacy flat structure
     edgeFiles.bam = null;
     edgeFiles.bai = null;
     edgeFiles.fasta = null;
@@ -105,24 +215,54 @@ function setMode(mode) {
     if (edgeFaiFileInput) edgeFaiFileInput.value = "";
   }
   updateModeUI();
-  setEdgeFile("bam", edgeFiles.bam);
+  updateEdgeFilesStatus();
 }
 
+
 function setEdgeFile(kind, file) {
-  edgeFiles[kind] = file || null;
-  const bamStatus = document.getElementById("bamStatus");
-  if (bamStatus) {
-    if (runMode === "edge") {
-      const bam = edgeFiles.bam ? edgeFiles.bam.name : "none";
-      const bai = edgeFiles.bai ? edgeFiles.bai.name : "none";
-      bamStatus.textContent = `Edge files: BAM=${bam}, BAI=${bai}`;
-      bamStatus.className = edgeFiles.bam && edgeFiles.bai ? "status-tag enabled" : "status-tag disabled";
-    } else {
-      bamStatus.textContent = "Path mode";
-      bamStatus.className = "status-tag";
+  if (kind === "bam" && file) {
+    findOrCreateTrack(file, null);
+  } else if (kind === "bai" && file) {
+    // Try to attach BAI to the last track
+    if (edgeFiles.tracks.length > 0) {
+      const lastTrack = edgeFiles.tracks[edgeFiles.tracks.length - 1];
+      if (!lastTrack.bai) {
+        lastTrack.bai = file;
+        console.log("BAI attached to track:", lastTrack.id);
+      }
     }
+  } else if (kind === "fasta") {
+    edgeFiles.reference.fasta = file || null;
+    edgeFiles.fasta = file || null; // Legacy
+  } else if (kind === "fai") {
+    edgeFiles.reference.fai = file || null;
+    edgeFiles.fai = file || null; // Legacy
+  } else {
+    edgeFiles[kind] = file || null;
+  }
+  
+  updateEdgeFilesStatus();
+}
+
+function updateEdgeFilesStatus() {
+  const bamStatus = document.getElementById("bamStatus");
+  if (!bamStatus) return;
+  
+  if (runMode === "edge") {
+    if (edgeFiles.tracks.length === 0) {
+      bamStatus.textContent = "Edge: no files loaded";
+      bamStatus.className = "status-tag disabled";
+    } else {
+      const trackNames = edgeFiles.tracks.map(t => t.name).join(", ");
+      bamStatus.textContent = `Edge: ${edgeFiles.tracks.length} track(s) (${trackNames})`;
+      bamStatus.className = "status-tag enabled";
+    }
+  } else {
+    bamStatus.textContent = "Path mode";
+    bamStatus.className = "status-tag";
   }
 }
+
 
 function inferFileKind(fileName) {
   const lower = fileName.toLowerCase();
@@ -134,11 +274,73 @@ function inferFileKind(fileName) {
 }
 
 function handleDroppedFiles(files) {
+  const bams = [];      // { bam: File, bai: File | null }
+  const orphanBais = []; // BAI files without matching BAM
+  
+  // First pass: classify files
   for (const file of files) {
     const kind = inferFileKind(file.name || "");
-    if (!kind) continue;
-    setEdgeFile(kind, file);
+    if (kind === "bam") {
+      bams.push({ bam: file, bai: null });
+    } else if (kind === "bai") {
+      orphanBais.push(file);
+    } else if (kind === "fasta") {
+      if (!edgeFiles.reference.fasta) {
+        edgeFiles.reference.fasta = file;
+        console.log("Reference FASTA loaded:", file.name, file.size);
+      } else {
+        console.warn("Reference FASTA already loaded, ignoring:", file.name);
+      }
+    } else if (kind === "fai") {
+      if (!edgeFiles.reference.fai) {
+        edgeFiles.reference.fai = file;
+        console.log("Reference FAI loaded:", file.name, file.size);
+      } else {
+        console.warn("Reference FAI already loaded, ignoring:", file.name);
+      }
+    }
   }
+  
+  // Second pass: match BAI to BAM by filename
+  // Match strategies: sample.bam → sample.bai OR sample.bam.bai
+  for (const bam of bams) {
+    const bamName = bam.bam.name;
+    const bamBase = bamName.replace(/\.bam$/i, '');
+    
+    // Try exact match: sample.bam.bai
+    let matchingBai = orphanBais.find(f => f.name === `${bamName}.bai`);
+    
+    // Fallback: sample.bai
+    if (!matchingBai) {
+      matchingBai = orphanBais.find(f => f.name === `${bamBase}.bai`);
+    }
+    
+    // Fallback: by base name (sample.bam with sample.bam.bai)
+    if (!matchingBai) {
+      matchingBai = orphanBais.find(
+        f => f.name.replace(/\.bai$/i, '') === bamName
+      );
+    }
+    
+    if (matchingBai) {
+      bam.bai = matchingBai;
+      orphanBais.splice(orphanBais.indexOf(matchingBai), 1);
+      console.log(`Matched BAI "${matchingBai.name}" to BAM "${bamName}"`);
+    }
+  }
+  
+  // Log orphan BAI files
+  for (const bai of orphanBais) {
+    console.warn("Orphan BAI file (no matching BAM):", bai.name);
+  }
+  
+  // Create or update tracks
+  for (const { bam, bai } of bams) {
+    findOrCreateTrack(bam, bai);
+  }
+  
+  // Update UI
+  updateEdgeFilesStatus();
 }
 
 async function initializeStatus() {
@@ -240,34 +442,66 @@ function buildEdgeRegionReference(region) {
   return buildChromosomeReference(`edge-region-${parsed.contig}`, [{ name: parsed.contig, length: inferredLength }]);
 }
 
-function computeSourceKey(region) {
+function computeSourceKey(region, pathModeTracks = null) {
   function fileIdentity(file) {
     if (!file) return "none";
     return `${file.name}:${file.size}:${file.lastModified}`;
   }
 
   if (runMode === "path") {
+    const trackKey = Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+      ? pathModeTracks.map((t) => `${t.sample_name || "sample"}:${t.bam_path || ""}`).join("|")
+      : (bamPathInput.value || "").trim();
+
     return [
       "path",
-      (bamPathInput.value || "").trim(),
+      trackKey,
       (fastaPathInput.value || "").trim(),
     ].join(":");
   }
 
+  // Edge mode: hash all tracks
   const parsedRegion = parseRegion(region || regionInput.value || "");
-  const edgeReferenceKey = edgeFiles.fasta ? fileIdentity(edgeFiles.fasta) : `region:${parsedRegion?.contig || "none"}`;
+  
+  // Support both new multi-BAM structure and legacy flat structure
+  const trackHashes = edgeFiles.tracks
+    .map(t => `${fileIdentity(t.bam)},${fileIdentity(t.bai)}`)
+    .join("|");
+  
+  const legacyTrackHash = (edgeFiles.tracks.length === 0)
+    ? `${fileIdentity(edgeFiles.bam)},${fileIdentity(edgeFiles.bai)}`
+    : "";
+  
+  const combinedTrackHash = trackHashes || legacyTrackHash;
+  const refFasta = edgeFiles.reference.fasta || edgeFiles.fasta;
+  const refFai = edgeFiles.reference.fai || edgeFiles.fai;
+  const edgeReferenceKey = refFasta ? fileIdentity(refFasta) : `region:${parsedRegion?.contig || "none"}`;
+  
   return [
     "edge",
-    fileIdentity(edgeFiles.bam),
-    fileIdentity(edgeFiles.bai),
+    combinedTrackHash,
     edgeReferenceKey,
-    fileIdentity(edgeFiles.fai),
+    fileIdentity(refFai),
   ].join(":");
 }
 
 function getAlignmentTrack() {
-  const trackView = (igvBrowser?.trackViews || []).find((tv) => tv?.track?.type === "alignment");
+  const trackView = (igvBrowser?.trackViews || []).find((tv) => isAlignmentLikeTrack(tv?.track));
   return trackView?.track || null;
+}
+
+// Get all alignment tracks (for multi-BAM support)
+function getAllAlignmentTracks() {
+  if (!igvBrowser || !igvBrowser.trackViews) return [];
+  return igvBrowser.trackViews
+    .filter(tv => isAlignmentLikeTrack(tv?.track))
+    .map(tv => tv.track);
+}
+
+// Get alignment track by index (for multi-BAM)
+function getAlignmentTrackByIndex(index) {
+  const tracks = getAllAlignmentTracks();
+  return tracks[index] || null;
 }
 
 function sleep(ms) {
@@ -286,9 +520,28 @@ async function waitForAlignmentTrackReady(timeoutMs = 3000, intervalMs = 150) {
   throw new Error("IGV alignment track not ready for feature extraction yet. Try again in a moment.");
 }
 
-async function buildReferenceConfig(region) {
+// Wait for all alignment tracks to be ready (for multi-BAM)
+async function waitForAllAlignmentTracksReady(timeoutMs = 3000, intervalMs = 150) {
+  const deadline = Date.now() + timeoutMs;
+  const expectedTrackCount = edgeFiles.tracks.length || 1;
+  
+  while (Date.now() < deadline) {
+    const tracks = getAllAlignmentTracks();
+    const readyTracks = tracks.filter(t => typeof t.getFeatures === "function");
+    
+    if (readyTracks.length === expectedTrackCount && expectedTrackCount > 0) {
+      return readyTracks;
+    }
+    
+    await sleep(intervalMs);
+  }
+  
+  throw new Error(`IGV alignment tracks not all ready. Expected ${expectedTrackCount}, but not all have getFeatures().`);
+}
+
+async function buildReferenceConfig(region, pathModePrimaryBamPath = "") {
   if (runMode === "path") {
-    const bamPath = (bamPathInput.value || "").trim();
+    const bamPath = (pathModePrimaryBamPath || bamPathInput.value || "").trim();
     const fastaPath = (fastaPathInput.value || "").trim();
     if (fastaPath) {
       return {
@@ -304,26 +557,30 @@ async function buildReferenceConfig(region) {
     return buildChromosomeReference(`path-bam-${bamPath}`, chromosomes);
   }
 
-  if (!edgeFiles.fasta) {
+  // Edge mode: check new multi-BAM reference structure first, then fallback to legacy
+  if (!edgeFiles.reference.fasta && !edgeFiles.fasta) {
     return buildEdgeRegionReference(region);
   }
 
-  if (!edgeFiles.fai) {
+  const fasta = edgeFiles.reference.fasta || edgeFiles.fasta;
+  const fai = edgeFiles.reference.fai || edgeFiles.fai;
+
+  if (!fai) {
     throw new Error("Edge FASTA mode requires a matching FAI index file.");
   }
 
   return {
-    id: `edge-reference-${edgeFiles.fasta.name}`,
-    fastaURL: edgeFiles.fasta,
-    indexFile: edgeFiles.fai,
+    id: `edge-reference-${fasta.name}`,
+    fastaURL: fasta,
+    indexFile: fai,
     indexed: true,
   };
 }
 
-async function ensureBrowser(region) {
+async function ensureBrowser(region, pathModeTracks = null) {
   if (!window.igv) throw new Error("IGV.js failed to load.");
 
-  const sourceKey = computeSourceKey(region);
+  const sourceKey = computeSourceKey(region, pathModeTracks);
   if (!sourceKey || sourceKey.endsWith(":")) {
     throw new Error("No BAM source configured for selected mode.");
   }
@@ -338,27 +595,61 @@ async function ensureBrowser(region) {
 
   if (igvBrowser && currentSourceKey === sourceKey) return igvBrowser;
 
-  const track = {
-    type: "alignment",
-    format: "bam",
-    name: "Alignments",
-    height: 500,
-    autoHeight: false,
-    displayMode: "SQUISHED",
-    viewAsPairs: false,
-    showSoftClips: true,
-  };
-
+  // Multi-BAM support: create tracks for all edge tracks, or single track for path mode
+  let tracks = [];
+  
   if (runMode === "path") {
-    const bamPath = (bamPathInput.value || "").trim();
-    track.url = `/api/file?path=${encodeURIComponent(bamPath)}`;
-    track.indexURL = `/api/index?bam_path=${encodeURIComponent(bamPath)}`;
-  } else {
-    if (!edgeFiles.bam || !edgeFiles.bai) {
-      throw new Error("Edge mode requires both BAM and BAI files.");
+    const effectivePathTracks = Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+      ? pathModeTracks.filter((track) => track?.bam_path)
+      : [];
+
+    if (effectivePathTracks.length > 0) {
+      tracks = buildPathModeTracks(effectivePathTracks);
+    } else {
+      const bamPath = (bamPathInput.value || "").trim();
+      tracks = buildPathModeTracks([{ bam_path: bamPath, sample_name: "sample_1" }]);
     }
-    track.localFile = edgeFiles.bam;
-    track.indexFile = edgeFiles.bai;
+  } else {
+    // Edge mode: create tracks for all loaded BAMs
+    if (edgeFiles.tracks.length === 0) {
+      // Fallback to legacy flat structure if no new-style tracks
+      if (!edgeFiles.bam || !edgeFiles.bai) {
+        throw new Error("Edge mode requires both BAM and BAI files.");
+      }
+      tracks = [{
+        type: "alignment",
+        format: "bam",
+        name: "Alignments",
+        height: 500,
+        autoHeight: false,
+        displayMode: "SQUISHED",
+        viewAsPairs: false,
+        showSoftClips: true,
+        localFile: edgeFiles.bam,
+        indexFile: edgeFiles.bai,
+      }];
+    } else {
+      // Multi-BAM: create one track per loaded BAM
+      const trackHeight = Math.max(200, Math.floor(600 / edgeFiles.tracks.length));
+      for (const track of edgeFiles.tracks) {
+        if (!track.bam || !track.bai) {
+          console.warn("Skipping edge track (missing BAI):", track.name);
+          continue;
+        }
+        tracks.push({
+          type: "alignment",
+          format: "bam",
+          name: track.name,
+          height: trackHeight,
+          autoHeight: false,
+          displayMode: "SQUISHED",
+          viewAsPairs: false,
+          showSoftClips: true,
+          localFile: track.bam,
+          indexFile: track.bai,
+        });
+      }
+    }
   }
 
   const options = {
@@ -367,10 +658,13 @@ async function ensureBrowser(region) {
     showRuler: true,
     showCenterGuide: true,
     showCursorTrackingGuide: true,
-    tracks: [track],
+    tracks: tracks,
   };
 
-  const referenceConfig = await buildReferenceConfig(region);
+  const primaryPath = runMode === "path" && Array.isArray(pathModeTracks) && pathModeTracks.length > 0
+    ? pathModeTracks[0].bam_path
+    : "";
+  const referenceConfig = await buildReferenceConfig(region, primaryPath);
   if (referenceConfig) {
     options.reference = referenceConfig;
   }
@@ -446,17 +740,13 @@ function computePairOrientation(feature) {
   return "RL";
 }
 
-async function extractEdgeSignals(region) {
-  if (!igvBrowser) return { coverage: [], reads: [] };
+// Process features from a single BAM track and return coverage/reads
+function processTrackFeatures(features, region) {
   const parsed = parseRegion(region);
-  if (!parsed || !parsed.start || !parsed.end) return { coverage: [], reads: [] };
-
-  const track = await waitForAlignmentTrackReady();
-  if (typeof track.getFeatures !== "function") {
-    throw new Error("IGV track API is incompatible with Edge extraction (missing getFeatures).");
+  if (!parsed || !parsed.start || !parsed.end) {
+    return { coverage: [], reads: [] };
   }
 
-  const features = await track.getFeatures(parsed.contig, parsed.start - 1, parsed.end, 1);
   const coverageBins = new Map();
   const reads = [];
   const maxReads = 200;
@@ -507,15 +797,95 @@ async function extractEdgeSignals(region) {
   return { coverage, reads };
 }
 
+async function extractEdgeSignals(region) {
+  if (!igvBrowser) return { samples: {} };
+  const parsed = parseRegion(region);
+  if (!parsed || !parsed.start || !parsed.end) return { samples: {} };
+
+  // Multi-BAM support: extract features from all tracks
+  const tracks = getAllAlignmentTracks();
+  const samples = {};
+  
+  if (tracks.length === 0) {
+    // No tracks loaded
+    console.warn("No alignment tracks found in browser");
+    return { samples: {} };
+  }
+
+  console.log(`[extractEdgeSignals] Extracting features from ${tracks.length} track(s) for region:`, region);
+
+  // Get track names from edgeFiles if available
+  let trackNames = edgeFiles.tracks.map(t => t.name);
+  if (trackNames.length === 0 && edgeFiles.bam) {
+    // Fallback: use "sample" for legacy single-BAM case
+    trackNames = ["sample"];
+  }
+  if (trackNames.length === 0) {
+    // Fallback: generate names from track indices
+    trackNames = tracks.map((_, i) => `track-${i}`);
+  }
+
+  // Extract features from each track
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i];
+    const trackName = trackNames[i] || `track-${i}`;
+
+    try {
+      if (!track || typeof track.getFeatures !== "function") {
+        console.warn(`Track ${i} (${trackName}) does not have getFeatures() method`);
+        samples[trackName] = { coverage: [], reads: [], error: "Track not ready" };
+        continue;
+      }
+
+      console.log(`[extractEdgeSignals] Track ${i} (${trackName}): calling getFeatures()`);
+      const features = await track.getFeatures(parsed.contig, parsed.start - 1, parsed.end, 1);
+      
+      const { coverage, reads } = processTrackFeatures(features, region);
+      
+      samples[trackName] = { coverage, reads };
+      
+      console.log(`[extractEdgeSignals] Track ${i} (${trackName}) extraction:`, {
+        coverage_positions: coverage.length,
+        reads_count: reads.length,
+      });
+    } catch (err) {
+      console.error(`[extractEdgeSignals] Failed to extract track ${i} (${trackName}):`, err.message);
+      samples[trackName] = { coverage: [], reads: [], error: err.message };
+    }
+  }
+
+  // For backward compatibility: also add combined flattened data
+  const allCoverage = [];
+  const allReads = [];
+  for (const [sampleName, data] of Object.entries(samples)) {
+    allCoverage.push(...(data.coverage || []));
+    allReads.push(...(data.reads || []));
+  }
+
+  // Return both new multi-BAM format and legacy flat format
+  return {
+    samples: samples,
+    coverage: allCoverage,
+    reads: allReads,
+  };
+}
+
 function applyExtractedInputs(message) {
+  const bamPaths = extractBamPathsFromText(message);
   const extracted = {
-    bamPath: extractPathFromText(message, [".bam"]),
+    bamPaths,
+    bamPath: bamPaths.length === 1 ? bamPaths[0] : null,
     fastaPath: extractPathFromText(message, [".fa", ".fasta", ".fa.gz", ".fasta.gz"]),
     region: extractRegionFromText(message),
   };
 
   if (runMode === "path") {
-    if (extracted.bamPath) bamPathInput.value = extracted.bamPath;
+    // For multi-BAM prompts, keep all paths visible instead of collapsing to one.
+    if (bamPaths.length > 1) {
+      bamPathInput.value = bamPaths.join(", ");
+    } else if (extracted.bamPath) {
+      bamPathInput.value = extracted.bamPath;
+    }
     if (extracted.fastaPath) fastaPathInput.value = extracted.fastaPath;
   }
   if (extracted.region) regionInput.value = extracted.region;
@@ -647,6 +1017,12 @@ async function fetchChat() {
   const loadingMsg = appendMessage("Analyzing...", false);
 
   try {
+    const requestedBamPathsFromMessage = extractBamPathsFromText(message);
+    const requestedBamPathsFromInput = extractBamPathsFromText((bamPathInput.value || "").trim());
+    const requestedBamPaths = requestedBamPathsFromMessage.length > 0
+      ? requestedBamPathsFromMessage
+      : requestedBamPathsFromInput;
+
     const payload = {
       message,
       mode: runMode,
@@ -654,14 +1030,28 @@ async function fetchChat() {
     };
 
     if (runMode === "path") {
-      payload.bam_path = (extracted.bamPath || bamPathInput.value || "").trim();
+      const fallbackBamPath = (extracted.bamPath || requestedBamPathsFromInput[0] || bamPathInput.value || "").trim();
+      const rawBamInput = (bamPathInput.value || "").trim();
+      // Priority: explicit BAM paths from current message > parsed BAM input paths > raw input fallback.
+      if (requestedBamPathsFromMessage.length > 0) {
+        payload.bam_path = requestedBamPathsFromMessage.join(", ");
+      } else if (requestedBamPathsFromInput.length > 0) {
+        payload.bam_path = requestedBamPathsFromInput.join(", ");
+      } else {
+        payload.bam_path = rawBamInput || fallbackBamPath;
+      }
       payload.fasta_path = (extracted.fastaPath || fastaPathInput.value || "").trim();
     } else {
       if (!region) throw new Error("Provide a region for Edge mode chat analysis.");
       const browser = await ensureBrowser(region);
       await browser.search(region);
       const edgePayload = await extractEdgeSignals(region);
-      if (!edgePayload.coverage.length && !edgePayload.reads.length) {
+      
+      // Check if we have any data: support both new multi-BAM format (samples) and legacy format
+      const hasSamples = edgePayload.samples && Object.keys(edgePayload.samples).length > 0;
+      const hasData = hasSamples || (edgePayload.coverage && edgePayload.coverage.length > 0) || (edgePayload.reads && edgePayload.reads.length > 0);
+      
+      if (!hasData) {
         throw new Error("No reads or coverage were found for the requested region in Edge mode.");
       }
       payload.edge_payload = edgePayload;
@@ -698,21 +1088,98 @@ async function fetchChat() {
       regionInput.value = resolvedRegion;
     }
 
-    if (runMode === "path" && resolvedRegion) {
-      const browser = await ensureBrowser(resolvedRegion);
+    if (runMode === "path") {
+      const responseBamTracks = Array.isArray(data.bam_tracks)
+        ? data.bam_tracks
+            .map((track, idx) => ({
+              sample_name: track?.sample_name || `sample_${idx + 1}`,
+              bam_path: track?.bam_path || "",
+            }))
+            .filter((track) => track.bam_path)
+        : [];
+      const trackEntries = Object.entries(data.per_track_results || {});
+      const backendTracks = responseBamTracks.length > 0
+        ? responseBamTracks
+        : trackEntries.length > 0
+        ? trackEntries
+            .map(([sampleName, trackData]) => ({
+              sample_name: sampleName,
+              bam_path: trackData?.bam_path || "",
+            }))
+            .filter((track) => track.bam_path)
+        : [{
+            sample_name: "sample_1",
+            bam_path: payload.bam_path,
+          }].filter((track) => track.bam_path);
+
+      const pathModeTracks = [...backendTracks];
+
+      if (pathModeTracks.length === 0) {
+        throw new Error("No BAM tracks available to load in IGV.");
+      }
+
+      const browser = await ensureBrowser(resolvedRegion, pathModeTracks);
 
       if (data.igv_params && typeof data.igv_params === "object") {
         // Try in-memory re-pair first (works when data is already cached in viewports)
         const needsReload = applyIgvParams(data.igv_params);
-        if (needsReload) {
+        if (needsReload && resolvedRegion) {
           // featureSource already updated; fresh search() will fetch with new setting
           await browser.search(resolvedRegion);
           // After data reloads, apply in-memory re-pair on the freshly loaded containers
           applyIgvParams(data.igv_params);
         }
-      } else {
+      } else if (resolvedRegion) {
         await browser.search(resolvedRegion);
       }
+
+      let allTracks = getAllAlignmentTracks();
+
+      // Fallback: if IGV created fewer tracks than expected, load missing tracks explicitly.
+      if (allTracks.length < pathModeTracks.length && typeof browser.loadTrack === "function") {
+        const perTrackHeight = pathModeTracks.length > 1
+          ? Math.max(200, Math.floor(700 / pathModeTracks.length))
+          : 500;
+
+        for (let i = allTracks.length; i < pathModeTracks.length; i += 1) {
+          const trackSpec = pathModeTracks[i];
+          try {
+            await browser.loadTrack({
+              id: generateTrackId(),
+              type: "alignment",
+              format: "bam",
+              name: trackSpec.sample_name || `sample_${i + 1}`,
+              height: perTrackHeight,
+              autoHeight: false,
+              displayMode: "SQUISHED",
+              viewAsPairs: false,
+              showSoftClips: true,
+              url: `/api/file?path=${encodeURIComponent(trackSpec.bam_path)}`,
+              indexURL: `/api/index?bam_path=${encodeURIComponent(trackSpec.bam_path)}`,
+            });
+          } catch (err) {
+            console.error(`Failed to fallback-load track ${trackSpec.sample_name || i}:`, err);
+          }
+        }
+        allTracks = getAllAlignmentTracks();
+      }
+
+      if (allTracks.length > 0) {
+        pathModeTracks.forEach((trackSpec, index) => {
+          const track = allTracks[index];
+          if (!track) return;
+          track.name = trackSpec.sample_name || track.name;
+          if (track.config) track.config.name = track.name;
+        });
+        if (typeof browser.repaint === "function") {
+          browser.repaint();
+        }
+      }
+
+      if (allTracks.length !== pathModeTracks.length) {
+        appendMessage(`Warning: expected ${pathModeTracks.length} IGV track(s), but found ${allTracks.length}.`);
+      }
+
     }
   } catch (error) {
     loadingMsg.remove();

@@ -97,6 +97,63 @@ def test_chat_stubbed(monkeypatch):
     assert response.json()["response"] == "ok"
 
 
+def test_chat_stubbed_includes_per_track_results(monkeypatch):
+    class DummyGraph:
+        def invoke(self, payload):
+            return {
+                "response": "ok",
+                "coverage": [{"pos": 1, "depth": 10}],
+                "reads": [{"name": "r1", "start": 1, "end": 2}],
+                "region": payload.get("region"),
+                "bam_tracks": [
+                    {"sample_name": "sample_1", "bam_path": "first.bam"},
+                    {"sample_name": "sample_2", "bam_path": "second.bam"},
+                ],
+                "per_track_results": {
+                    "sample_1": {
+                        "bam_path": "first.bam",
+                        "sample_name": "sample_1",
+                        "coverage": [{"pos": 1, "depth": 10}],
+                        "reads": [{"name": "r1", "start": 1, "end": 2}],
+                        "error": None,
+                    },
+                    "sample_2": {
+                        "bam_path": "second.bam",
+                        "sample_name": "sample_2",
+                        "coverage": [{"pos": 1, "depth": 8}],
+                        "reads": [{"name": "r2", "start": 1, "end": 2}],
+                        "error": None,
+                    },
+                },
+            }
+
+    monkeypatch.setattr(main, "_graph", DummyGraph())
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "Load first.bam and second.bam",
+            "mode": "path",
+            "bam_path": "first.bam",
+            "region": "chr1:1-2",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "bam_tracks" in data
+    assert isinstance(data["bam_tracks"], list)
+    assert len(data["bam_tracks"]) == 2
+    assert data["bam_tracks"][0]["bam_path"] == "first.bam"
+    assert data["bam_tracks"][1]["bam_path"] == "second.bam"
+    assert "per_track_results" in data
+    assert isinstance(data["per_track_results"], dict)
+    assert sorted(data["per_track_results"].keys()) == ["sample_1", "sample_2"]
+    assert data["per_track_results"]["sample_1"]["bam_path"] == "first.bam"
+    assert data["per_track_results"]["sample_2"]["bam_path"] == "second.bam"
+
+
 def test_chat_edge_mode_with_payload(monkeypatch):
     class DummyGraph:
         def invoke(self, payload):
@@ -2298,3 +2355,53 @@ def test_intent_agent_user_preset_overrides_builtin(monkeypatch):
         f"got: {result.get('igv_params')}"
     )
     print("\n[S02/T03] ✓ test_intent_agent_user_preset_overrides_builtin passed")
+
+
+def test_intent_agent_extracts_multiple_bam_paths_into_tracks(monkeypatch):
+    """Free-text path mode prompt with two BAM paths yields two bam_tracks with ordinal names."""
+    import app.agents.graph as gm
+
+    monkeypatch.setattr(gm, "USE_LLM", False)
+
+    state = {
+        "message": "Load first.bam and second.bam",
+        "region": "20:59000-61000",
+        "bam_path": "",
+        "intent": "",
+        "response": "",
+    }
+
+    result = gm.intent_agent(state)
+    bam_tracks = result.get("bam_tracks", [])
+
+    assert len(bam_tracks) == 2, f"Expected 2 bam_tracks, got: {bam_tracks}"
+    assert bam_tracks[0]["bam_path"] == "first.bam"
+    assert bam_tracks[1]["bam_path"] == "second.bam"
+    assert bam_tracks[0]["sample_name"] == "sample_1"
+    assert bam_tracks[1]["sample_name"] == "sample_2"
+    print("\n[S02/T03] ✓ test_intent_agent_extracts_multiple_bam_paths_into_tracks passed")
+
+
+def test_intent_agent_extracts_multiple_bam_paths_from_bam_path_field(monkeypatch):
+    """Path input containing multiple BAMs should also materialize bam_tracks in order."""
+    import app.agents.graph as gm
+
+    monkeypatch.setattr(gm, "USE_LLM", False)
+
+    state = {
+        "message": "analyze this",
+        "region": "20:59000-61000",
+        "bam_path": "first.bam, second.bam",
+        "intent": "",
+        "response": "",
+    }
+
+    result = gm.intent_agent(state)
+    bam_tracks = result.get("bam_tracks", [])
+
+    assert len(bam_tracks) == 2, f"Expected 2 bam_tracks, got: {bam_tracks}"
+    assert bam_tracks[0]["bam_path"] == "first.bam"
+    assert bam_tracks[1]["bam_path"] == "second.bam"
+    assert bam_tracks[0]["sample_name"] == "sample_1"
+    assert bam_tracks[1]["sample_name"] == "sample_2"
+    print("\n[S02/T03] ✓ test_intent_agent_extracts_multiple_bam_paths_from_bam_path_field passed")

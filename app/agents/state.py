@@ -5,6 +5,7 @@ class ChatState(TypedDict, total=False):
     message: str
     mode: Literal["path", "edge"]
     bam_path: str
+    bam_tracks: List[Dict[str, str]]
     region: str
     coverage: List[Dict[str, Any]]
     reads: List[Dict[str, Any]]
