@@ -649,7 +649,6 @@ async function ensureBrowser(region, pathModeTracks = null) {
           indexFile: track.bai,
         });
       }
-      console.log("Edge mode: creating browser with", tracks.length, "tracks");
     }
   }
 
@@ -670,9 +669,6 @@ async function ensureBrowser(region, pathModeTracks = null) {
     options.reference = referenceConfig;
   }
 
-  console.log("[ensureBrowser] sourceKey:", sourceKey);
-  console.log("[ensureBrowser] tracks count:", tracks.length);
-  console.log("[ensureBrowser] tracks:", JSON.stringify(tracks.map(t => ({name: t.name, url: t.url}))));
   igvContainer.innerHTML = "";
   igvBrowser = await igv.createBrowser(igvContainer, options);
 
@@ -1117,25 +1113,10 @@ async function fetchChat() {
           }].filter((track) => track.bam_path);
 
       const pathModeTracks = [...backendTracks];
-      const existingPaths = new Set(pathModeTracks.map((track) => track.bam_path));
-      requestedBamPaths.forEach((requestedPath) => {
-        if (!requestedPath || existingPaths.has(requestedPath)) return;
-        pathModeTracks.push({
-          sample_name: `sample_${pathModeTracks.length + 1}`,
-          bam_path: requestedPath,
-        });
-        existingPaths.add(requestedPath);
-      });
 
       if (pathModeTracks.length === 0) {
         throw new Error("No BAM tracks available to load in IGV.");
       }
-
-      console.log("[fetchChat] per_track_results keys:", Object.keys(data.per_track_results || {}));
-      console.log("[fetchChat] pathModeTracks:", JSON.stringify(pathModeTracks));
-      appendMessage(
-        `Track plan: ${pathModeTracks.map((t) => `${t.sample_name}->${t.bam_path}`).join(", ")}`
-      );
 
       const browser = await ensureBrowser(resolvedRegion, pathModeTracks);
 
@@ -1199,9 +1180,6 @@ async function fetchChat() {
         appendMessage(`Warning: expected ${pathModeTracks.length} IGV track(s), but found ${allTracks.length}.`);
       }
 
-      appendMessage(
-        `Visible IGV tracks: ${allTracks.map((t) => t?.name || "(unnamed)").join(", ") || "none"}`
-      );
     }
   } catch (error) {
     loadingMsg.remove();

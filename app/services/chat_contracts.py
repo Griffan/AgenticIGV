@@ -119,7 +119,6 @@ def normalize_chat_request(request: ChatContract) -> NormalizedChatInput:
         all_coverage = []
         all_reads = []
         sample_names = []
-        validation_errors = []
         
         for sample_name, data in samples_dict.items():
             if not isinstance(data, dict):

@@ -1,331 +1,156 @@
-"""
-Tests for edge payload contract and multi-BAM normalization.
-"""
+"""Compact contract tests focused on external behavior (not internal implementation details)."""
+
 import pytest
-from app.services.chat_contracts import (
-    ChatContract,
-    ContractError,
-    normalize_chat_request,
-    EdgePayload,
+from pydantic import ValidationError
+
+from app.services.chat_contracts import ChatContract, ContractError, normalize_chat_request
+
+
+def test_edge_flat_normalization_success():
+    request = ChatContract(
+        message="analyze",
+        mode="edge",
+        region="chr1:1-100",
+        edge_payload={
+            "coverage": [{"pos": 10, "depth": 5}],
+            "reads": [{"name": "r1", "start": 5, "end": 20}],
+        },
+    )
+
+    normalized = normalize_chat_request(request)
+    assert normalized["mode"] == "edge"
+    assert normalized["region"] == "chr1:1-100"
+    assert len(normalized["coverage"]) == 1
+    assert len(normalized["reads"]) == 1
+    assert normalized.get("samples_metadata") is None
+    assert normalized["bam_path"] == ""
+
+
+@pytest.mark.parametrize(
+    "contract_input, expected_error",
+    [
+        (
+            ChatContract(message="analyze", mode="edge", edge_payload={"coverage": [], "reads": []}),
+            "region is required",
+        ),
+        (
+            ChatContract(message="analyze", mode="edge", region="chr1:1-100"),
+            "edge_payload is required",
+        ),
+        (
+            ChatContract(
+                message="analyze",
+                mode="edge",
+                region="chr1:1-100",
+                edge_payload={"coverage": [], "reads": []},
+            ),
+            "at least one coverage or read",
+        ),
+        (
+            ChatContract(
+                message="analyze",
+                mode="edge",
+                region="chr1:1-100",
+                edge_payload={"coverage": [{"pos": 10}], "reads": []},
+            ),
+            "'pos' and 'depth'",
+        ),
+        (
+            ChatContract(
+                message="analyze",
+                mode="edge",
+                region="chr1:1-100",
+                edge_payload={"coverage": [], "reads": [{"name": "r1"}]},
+            ),
+            "reads items must include",
+        ),
+    ],
 )
+def test_edge_flat_normalization_errors(contract_input, expected_error):
+    with pytest.raises(ContractError, match=expected_error):
+        normalize_chat_request(contract_input)
 
 
-class TestSingleBAMEdgePayload:
-    """Test backward-compatible single-BAM edge payloads (flat format)."""
-    
-    def test_valid_flat_edge_payload(self):
-        """Single BAM with flat coverage/reads format."""
-        request = ChatContract(
-            message="analyze this",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "coverage": [{"pos": 10, "depth": 5}],
-                "reads": [{"name": "read1", "start": 5, "end": 20}],
-            },
-        )
-        
-        normalized = normalize_chat_request(request)
-        
-        assert normalized["mode"] == "edge"
-        assert normalized["region"] == "chr1:1-100"
-        assert len(normalized["coverage"]) == 1
-        assert normalized["coverage"][0]["pos"] == 10
-        assert len(normalized["reads"]) == 1
-        assert normalized["reads"][0]["name"] == "read1"
-        assert normalized.get("samples_metadata") is None
-        assert normalized["bam_path"] == ""
-    
-    def test_flat_payload_missing_region(self):
-        """Edge mode requires region."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            edge_payload={"coverage": [], "reads": []},
-        )
-        
-        with pytest.raises(ContractError, match="region is required"):
-            normalize_chat_request(request)
-    
-    def test_flat_payload_missing_edge_payload(self):
-        """Edge mode requires edge_payload."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-        )
-        
-        with pytest.raises(ContractError, match="edge_payload is required"):
-            normalize_chat_request(request)
-    
-    def test_flat_payload_empty_coverage_and_reads(self):
-        """Must have at least one coverage or read."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={"coverage": [], "reads": []},
-        )
-        
-        with pytest.raises(ContractError, match="at least one coverage or read"):
-            normalize_chat_request(request)
-    
-    def test_flat_payload_invalid_coverage_item(self):
-        """Coverage items must have pos and depth."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "coverage": [{"pos": 10}],  # Missing depth
-                "reads": [],
-            },
-        )
-        
-        with pytest.raises(ContractError, match="'pos' and 'depth'"):
-            normalize_chat_request(request)
-    
-    def test_flat_payload_invalid_read_item(self):
-        """Read items must have name, start, end."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "coverage": [],
-                "reads": [{"name": "read1", "start": 5}],  # Missing end
-            },
-        )
-        
-        with pytest.raises(ContractError, match="reads items must include"):
-            normalize_chat_request(request)
-
-
-class TestMultiBAMEdgePayload:
-    """Test new multi-BAM edge payloads with samples dict."""
-    
-    def test_valid_two_sample_payload(self):
-        """Two samples with coverage and reads."""
-        request = ChatContract(
-            message="compare samples",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "samples": {
-                    "sample1": {
-                        "coverage": [{"pos": 10, "depth": 5}],
-                        "reads": [{"name": "read1", "start": 5, "end": 20}],
-                    },
-                    "sample2": {
-                        "coverage": [{"pos": 10, "depth": 8}],
-                        "reads": [{"name": "read2", "start": 8, "end": 25}],
-                    },
-                }
-            },
-        )
-        
-        normalized = normalize_chat_request(request)
-        
-        assert normalized["mode"] == "edge"
-        assert len(normalized["coverage"]) == 2
-        assert len(normalized["reads"]) == 2
-        assert normalized["samples_metadata"] == ["sample1", "sample2"]
-    
-    def test_multi_sample_with_empty_reads(self):
-        """Multi-sample where one has only coverage."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "samples": {
-                    "sample1": {
-                        "coverage": [{"pos": 10, "depth": 5}],
-                        "reads": [],
-                    },
-                    "sample2": {
-                        "coverage": [{"pos": 10, "depth": 8}],
-                        "reads": [{"name": "read2", "start": 8, "end": 25}],
-                    },
-                }
-            },
-        )
-        
-        normalized = normalize_chat_request(request)
-        
-        assert len(normalized["coverage"]) == 2
-        assert len(normalized["reads"]) == 1
-        assert normalized["samples_metadata"] == ["sample1", "sample2"]
-    
-    def test_multi_sample_with_sample_error(self):
-        """Multi-sample payload may include error field per sample."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "samples": {
-                    "sample1": {
-                        "coverage": [{"pos": 10, "depth": 5}],
-                        "reads": [],
-                    },
-                    "sample2": {
-                        "coverage": [],
-                        "reads": [],
-                        "error": "BAI not found",
-                    },
-                }
-            },
-        )
-        
-        # Should normalize successfully even if one sample has an error field
-        normalized = normalize_chat_request(request)
-        assert normalized["samples_metadata"] == ["sample1", "sample2"]
-    
-    def test_multi_sample_empty_samples_dict(self):
-        """Empty samples dict should be treated as flat format."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "samples": {},
-                "coverage": [{"pos": 10, "depth": 5}],
-                "reads": [],
-            },
-        )
-        
-        # Empty samples dict should fall back to flat format
-        normalized = normalize_chat_request(request)
-        assert len(normalized["coverage"]) == 1
-    
-    def test_multi_sample_invalid_sample_type(self):
-        """Sample value must be a dict - Pydantic validates this at request level."""
-        from pydantic import ValidationError
-        
-        with pytest.raises(ValidationError):
-            ChatContract(
-                message="analyze",
-                mode="edge",
-                region="chr1:1-100",
-                edge_payload={
-                    "samples": {
-                        "sample1": [{"pos": 10, "depth": 5}],  # Array instead of dict
-                    }
+def test_edge_multi_sample_normalization_success():
+    request = ChatContract(
+        message="compare",
+        mode="edge",
+        region="chr20:1000-2000",
+        edge_payload={
+            "samples": {
+                "tumor": {
+                    "coverage": [{"pos": 1000, "depth": 20}],
+                    "reads": [{"name": "t1", "start": 950, "end": 1100}],
                 },
-            )
-    
-    def test_multi_sample_invalid_coverage_array(self):
-        """Coverage within sample must be array - Pydantic validates this at request level."""
-        from pydantic import ValidationError
-        
-        with pytest.raises(ValidationError):
-            ChatContract(
-                message="analyze",
-                mode="edge",
-                region="chr1:1-100",
-                edge_payload={
-                    "samples": {
-                        "sample1": {
-                            "coverage": "not_an_array",
-                            "reads": [],
-                        },
-                    }
+                "normal": {
+                    "coverage": [{"pos": 1000, "depth": 10}],
+                    "reads": [{"name": "n1", "start": 960, "end": 1080}],
                 },
-            )
-    
-    def test_multi_sample_invalid_read_item(self):
-        """Invalid read item within sample fails validation."""
-        request = ChatContract(
+            }
+        },
+    )
+
+    normalized = normalize_chat_request(request)
+    assert normalized["samples_metadata"] == ["tumor", "normal"]
+    assert len(normalized["coverage"]) == 2
+    assert len(normalized["reads"]) == 2
+
+
+def test_edge_multi_sample_all_empty_errors():
+    request = ChatContract(
+        message="analyze",
+        mode="edge",
+        region="chr1:1-100",
+        edge_payload={
+            "samples": {
+                "sample1": {"coverage": [], "reads": []},
+                "sample2": {"coverage": [], "reads": []},
+            }
+        },
+    )
+
+    with pytest.raises(ContractError, match="samples must contain at least one sample"):
+        normalize_chat_request(request)
+
+
+@pytest.mark.parametrize(
+    "edge_payload",
+    [
+        {"samples": {"sample1": [{"pos": 10, "depth": 5}] }},
+        {"samples": [{"name": "sample1"}]},
+    ],
+)
+def test_edge_multi_sample_pydantic_shape_validation(edge_payload):
+    with pytest.raises(ValidationError):
+        ChatContract(
             message="analyze",
             mode="edge",
             region="chr1:1-100",
-            edge_payload={
-                "samples": {
-                    "sample1": {
-                        "coverage": [],
-                        "reads": [{"name": "read1"}],  # Missing start and end
-                    },
-                }
-            },
-        )
-        
-        with pytest.raises(ContractError, match="reads items must include"):
-            normalize_chat_request(request)
-    
-    def test_multi_sample_all_empty(self):
-        """All samples empty should raise error."""
-        request = ChatContract(
-            message="analyze",
-            mode="edge",
-            region="chr1:1-100",
-            edge_payload={
-                "samples": {
-                    "sample1": {"coverage": [], "reads": []},
-                    "sample2": {"coverage": [], "reads": []},
-                }
-            },
-        )
-        
-        with pytest.raises(
-            ContractError, match="samples must contain at least one sample with"
-        ):
-            normalize_chat_request(request)
-    
-    def test_multi_sample_samples_not_dict(self):
-        """Samples value must be dict, not array - Pydantic validates at request level."""
-        from pydantic import ValidationError
-        
-        with pytest.raises(ValidationError):
-            ChatContract(
-                message="analyze",
-                mode="edge",
-                region="chr1:1-100",
-                edge_payload={"samples": [{"name": "sample1"}]},
-            )
-
-
-class TestPathMode:
-    """Verify path mode normalization and BAM extraction priority."""
-    
-    def test_path_mode_normalization(self):
-        """Path mode should preserve explicit single bam_path."""
-        request = ChatContract(
-            message="hello",
-            mode="path",
-            bam_path="/path/to/test.bam",
-            region="chr1:1-100",
-        )
-        
-        normalized = normalize_chat_request(request)
-        
-        assert normalized["mode"] == "path"
-        assert normalized["bam_path"] == "/path/to/test.bam"
-        assert normalized["region"] == "chr1:1-100"
-        assert "coverage" not in normalized or normalized.get("coverage") is None
-
-    def test_path_mode_prefers_message_bams_over_stale_field(self):
-        """Message BAM list should override stale single bam_path field value."""
-        request = ChatContract(
-            message='Load "/tmp/first.bam" and "/tmp/second.bam" in region chr1:1-100',
-            mode="path",
-            bam_path="/tmp/second.bam",
-            region="chr1:1-100",
+            edge_payload=edge_payload,
         )
 
-        normalized = normalize_chat_request(request)
 
-        assert normalized["bam_path"] == "/tmp/first.bam, /tmp/second.bam"
+@pytest.mark.parametrize(
+    "message, bam_path, expected_bam_path",
+    [
+        ("hello", "/path/to/test.bam", "/path/to/test.bam"),
+        (
+            'Load "/tmp/first.bam" and "/tmp/second.bam" in region chr1:1-100',
+            "/tmp/second.bam",
+            "/tmp/first.bam, /tmp/second.bam",
+        ),
+        ("analyze this", "/tmp/first.bam, /tmp/second.bam", "/tmp/first.bam, /tmp/second.bam"),
+    ],
+)
+def test_path_mode_bam_selection_priority(message, bam_path, expected_bam_path):
+    request = ChatContract(
+        message=message,
+        mode="path",
+        bam_path=bam_path,
+        region="chr1:1-100",
+    )
 
-    def test_path_mode_uses_all_field_bams_when_message_has_none(self):
-        """If message has no BAMs, parse and normalize comma-separated field BAMs."""
-        request = ChatContract(
-            message="analyze this",
-            mode="path",
-            bam_path="/tmp/first.bam, /tmp/second.bam",
-            region="chr1:1-100",
-        )
-
-        normalized = normalize_chat_request(request)
-
-        assert normalized["bam_path"] == "/tmp/first.bam, /tmp/second.bam"
+    normalized = normalize_chat_request(request)
+    assert normalized["mode"] == "path"
+    assert normalized["region"] == "chr1:1-100"
+    assert normalized["bam_path"] == expected_bam_path

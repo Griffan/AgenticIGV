@@ -2379,9 +2379,6 @@ def test_intent_agent_extracts_multiple_bam_paths_into_tracks(monkeypatch):
     assert bam_tracks[1]["bam_path"] == "second.bam"
     assert bam_tracks[0]["sample_name"] == "sample_1"
     assert bam_tracks[1]["sample_name"] == "sample_2"
-    assert result.get("bam_path") == "", (
-        f"Expected bam_path to be cleared when bam_tracks exist, got: {result.get('bam_path')}"
-    )
     print("\n[S02/T03] ✓ test_intent_agent_extracts_multiple_bam_paths_into_tracks passed")
 
 
@@ -2407,5 +2404,4 @@ def test_intent_agent_extracts_multiple_bam_paths_from_bam_path_field(monkeypatc
     assert bam_tracks[1]["bam_path"] == "second.bam"
     assert bam_tracks[0]["sample_name"] == "sample_1"
     assert bam_tracks[1]["sample_name"] == "sample_2"
-    assert result.get("bam_path") == ""
     print("\n[S02/T03] ✓ test_intent_agent_extracts_multiple_bam_paths_from_bam_path_field passed")

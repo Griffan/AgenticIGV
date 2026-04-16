@@ -98,8 +98,6 @@ def _content_to_text(content: Any) -> str:
 def intent_agent(state: ChatState) -> ChatState:
     """Understand user intent, extract region, IGV parameters, and preset requests via LLM or pattern matching."""
     message = state.get("message", "")
-    if DEBUG:
-        print(f"[DEBUG] intent_agent: message={message}")
     # Try to extract region and BAM path
     region = state.get("region") or _extract_region(message)
 
@@ -123,11 +121,6 @@ def intent_agent(state: ChatState) -> ChatState:
     # When multi-track input is available, clear single bam_path to avoid stale/single-path overrides.
     if state.get("bam_tracks"):
         state["bam_path"] = ""
-    if DEBUG:
-        print(
-            f"[DEBUG] intent_agent: region={region}, bam_path={bam_path}, "
-            f"bam_tracks={len(state.get('bam_tracks', []))}"
-        )
 
     # --- IGV.js parameter extraction and preset support ---
     # Supported IGV.js parameters and their natural-language aliases
@@ -218,8 +211,6 @@ def intent_agent(state: ChatState) -> ChatState:
             state["region"] = region
         if not state.get("response"):
             state["response"] = state.get("igv_feedback", "IGV settings updated.")
-        if DEBUG:
-            print(f"[DEBUG] intent_agent: IGV param match, skipping LLM. params={param_changes}, preset={preset}")
         return state
 
     # --- End IGV.js parameter extraction ---
@@ -229,16 +220,12 @@ def intent_agent(state: ChatState) -> ChatState:
         if not region:
             state["response"] = "Please provide a region like chr1:100-200 or 20:59000-61000."
             state["halt"] = True
-            if DEBUG:
-                print(f"[DEBUG] intent_agent: halt, missing region")
             return state
         state["region"] = region
         if VARIANT_KEYWORDS.search(message or ""):
             state["intent"] = "analyze_variant"
         else:
             state["intent"] = "view_region"
-        if DEBUG:
-            print(f"[DEBUG] intent_agent: intent={state['intent']}")
         return state
     # Use LLM to understand intent
     llm = ChatOpenAI(model=MODEL_NAME, temperature=0, base_url=BASE_URL, api_key=SecretStr(API_KEY) if API_KEY else None)
@@ -297,8 +284,6 @@ Respond in JSON format:
             else:
                 state["igv_feedback"] = f"Preset '{llm_preset}' not recognized."
         state["extracted_info"] = result
-        if DEBUG:
-            print(f"[DEBUG] intent_agent: LLM result={result}")
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] intent_agent: LLM exception: {e}")
@@ -309,44 +294,30 @@ Respond in JSON format:
                 state["intent"] = "analyze_variant"
             else:
                 state["intent"] = "view_region"
-            if DEBUG:
-                print(f"[DEBUG] intent_agent: fallback intent={state['intent']}")
         else:
             state["intent"] = "unknown"
-            if DEBUG:
-                print(f"[DEBUG] intent_agent: fallback unknown intent")
     return state
 
 
 def bam_agent(state: ChatState) -> ChatState:
     """Fetch BAM data for all tracks independently with per-track error isolation"""
     if state.get("halt"):
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: halted early")
         return state
     mode = state.get("mode", "path")
-    if DEBUG:
-        print(f"[DEBUG] bam_agent: mode={mode}")
     if mode == "edge":
         # Edge mode ships pre-parsed reads/coverage from browser-side parsing.
         state["coverage"] = state.get("coverage", [])
         state["reads"] = state.get("reads", [])
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: edge mode, returning early")
         return state
     
     intent = state.get("intent", "unknown")
     region = state.get("region")
-    if DEBUG:
-        print(f"[DEBUG] bam_agent: intent={intent}, region={region}")
     
     # Check if we need to require a region
     if not region:
         if intent in ["view_region", "analyze_coverage", "analyze_reads", "analyze_variant"]:
             state["response"] = "Please provide a genomic region to analyze."
             state["halt"] = True
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: missing region, halting")
         return state
     
     # Get tracks to process — support both multi-BAM and single-BAM (backward compat)
@@ -361,16 +332,12 @@ def bam_agent(state: ChatState) -> ChatState:
             }
         ]
         state["bam_tracks"] = bam_tracks
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: wrapped single bam_path as 1-element bam_tracks")
     
     # If still no tracks, halt
     if not bam_tracks:
         if intent in ["view_region", "analyze_coverage", "analyze_reads", "analyze_variant"]:
             state["response"] = "Please provide a BAM path or BAM tracks to analyze."
             state["halt"] = True
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: no bam_tracks, halting")
         return state
     
     # Determine which samples are active
@@ -383,9 +350,6 @@ def bam_agent(state: ChatState) -> ChatState:
             for i, track in enumerate(bam_tracks)
         ]
         state["active_sample_names"] = active_sample_names
-    
-    if DEBUG:
-        print(f"[DEBUG] bam_agent: processing {len(bam_tracks)} tracks, active: {active_sample_names}")
     
     # Process each track independently with error isolation
     per_track_results: Dict[str, Any] = {}
@@ -403,26 +367,12 @@ def bam_agent(state: ChatState) -> ChatState:
         
         # Skip inactive samples
         if sample_name not in active_sample_names:
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: skipping inactive sample {sample_name}")
             continue
-        
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: processing sample={sample_name}, bam_path={bam_path}")
         
         try:
             # Fetch coverage and reads for this track
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: calling get_coverage for {sample_name}")
             coverage = get_coverage(bam_path, region)
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: coverage for {sample_name}={coverage[:2] if coverage else []}... (total {len(coverage)})")
-            
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: calling get_reads for {sample_name}")
             reads = get_reads(bam_path, region)
-            if DEBUG:
-                print(f"[DEBUG] bam_agent: reads for {sample_name}={reads[:2] if reads else []}... (total {len(reads)})")
             
             # Store per-track results
             per_track_results[sample_name] = {
@@ -485,15 +435,11 @@ def bam_agent(state: ChatState) -> ChatState:
         first_result = per_track_results[first_sample]
         state["coverage"] = first_result.get("coverage", [])
         state["reads"] = first_result.get("reads", [])
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: backward compat: exposed first sample {first_sample} at top level")
     else:
         # All tracks failed
         state["coverage"] = []
         state["reads"] = []
         # Don't halt yet — downstream agents can decide what to do
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: no successfully analyzed samples")
     
     return state
 
@@ -645,37 +591,22 @@ def variant_agent(state: ChatState) -> ChatState:
     
     # If we have per-track results, analyze each track independently
     if per_track_results:
-        if DEBUG:
-            print(f"[DEBUG] variant_agent: analyzing {len(per_track_results)} tracks independently")
-        
         first_successful_assessment = None
         
         for sample_name, track_result in per_track_results.items():
             # Skip tracks with errors
             if track_result.get("error"):
-                if DEBUG:
-                    print(f"[DEBUG] variant_agent: skipping {sample_name} due to error: {track_result.get('error')}")
                 continue
             
             # Extract reads and coverage for this track
             reads = track_result.get("reads", [])
             coverage = track_result.get("coverage", [])
             
-            if DEBUG:
-                print(f"[DEBUG] variant_agent: analyzing {sample_name} with {len(reads)} reads, {len(coverage)} coverage points")
-            
             # Analyze variant evidence for this track
             variant_assessment = _analyze_variant_for_reads_coverage(reads, coverage, region)
             
             # Store per-track variant assessment
             track_result["variant_assessment"] = variant_assessment
-            
-            # Log per-track SV evidence for observability
-            sv_type = variant_assessment.get("sv_type", "none")
-            confidence = variant_assessment.get("confidence", 0.0)
-            evidence_summary = "; ".join(variant_assessment.get("evidence", [])[:3])
-            if DEBUG:
-                print(f"[DEBUG] variant_agent: {sample_name} SV={sv_type} (conf={confidence}): {evidence_summary}")
             
             # Save first successful assessment for backward compat
             if first_successful_assessment is None:
@@ -684,8 +615,6 @@ def variant_agent(state: ChatState) -> ChatState:
         # Backward compat: expose first successful track's assessment at top level
         if first_successful_assessment is not None:
             state["variant_assessment"] = first_successful_assessment
-            if DEBUG:
-                print(f"[DEBUG] variant_agent: backward compat: exposed first assessment at top level")
         else:
             # All tracks had errors or no data
             state["variant_assessment"] = {
@@ -695,15 +624,10 @@ def variant_agent(state: ChatState) -> ChatState:
                 "evidence": ["No successful BAM analysis available."],
                 "metrics": {"read_count": 0, "region": region},
             }
-            if DEBUG:
-                print(f"[DEBUG] variant_agent: no successful tracks, using empty assessment")
     else:
         # Fallback for backward compat: single-BAM path (no per_track_results yet)
         reads = state.get("reads", [])
         coverage = state.get("coverage", [])
-        
-        if DEBUG:
-            print(f"[DEBUG] variant_agent: backward compat analysis with {len(reads)} reads")
         
         state["variant_assessment"] = _analyze_variant_for_reads_coverage(reads, coverage, region)
     
@@ -723,9 +647,6 @@ def response_agent(state: ChatState) -> ChatState:
     per_track_results = state.get("per_track_results", {})
     active_sample_names = state.get("active_sample_names", [])
     
-    if DEBUG:
-        print(f"[DEBUG] response_agent: per_track_results={list(per_track_results.keys())}, active={active_sample_names}")
-    
     # Build per-track summaries
     track_summaries: Dict[str, Dict[str, Any]] = {}
     analyzed_samples: list[str] = []
@@ -735,14 +656,10 @@ def response_agent(state: ChatState) -> ChatState:
         for sample_name, track_result in per_track_results.items():
             # Filter to active samples
             if active_sample_names and sample_name not in active_sample_names:
-                if DEBUG:
-                    print(f"[DEBUG] response_agent: skipping inactive sample {sample_name}")
                 continue
             
             # Check for error
             if track_result.get("error"):
-                if DEBUG:
-                    print(f"[DEBUG] response_agent: skipping {sample_name} due to error: {track_result.get('error')}")
                 track_summaries[sample_name] = {
                     "error": track_result.get("error"),
                     "error_type": track_result.get("error_type"),
@@ -769,9 +686,6 @@ def response_agent(state: ChatState) -> ChatState:
                 "error": None,
             }
             analyzed_samples.append(sample_name)
-            
-            if DEBUG:
-                print(f"[DEBUG] response_agent: {sample_name}: cov_mean={coverage_stats.get('mean', 0):.1f}, reads={read_count}, sv={variant_assessment.get('sv_type')}")
     
     if not USE_LLM:
         # Simple fallback response (backward compat + multi-track)
@@ -1024,9 +938,6 @@ Provide a helpful response to the user's question. When multiple samples are ana
             )
         else:
             state["response"] = "I understood your question but couldn't generate a detailed response. Please try again."
-    
-    if DEBUG:
-        print(f"[DEBUG] response_agent: response generated, samples analyzed: {analyzed_samples}")
     
     return state
 
