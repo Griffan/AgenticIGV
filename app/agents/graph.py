@@ -292,7 +292,7 @@ Respond in JSON format:
 
 
 def bam_agent(state: ChatState) -> ChatState:
-    """Fetch BAM data if region is specified"""
+    """Fetch BAM data for all tracks independently with per-track error isolation"""
     if state.get("halt"):
         if DEBUG:
             print(f"[DEBUG] bam_agent: halted early")
@@ -307,56 +307,180 @@ def bam_agent(state: ChatState) -> ChatState:
         if DEBUG:
             print(f"[DEBUG] bam_agent: edge mode, returning early")
         return state
+    
     intent = state.get("intent", "unknown")
-    bam_path = state.get("bam_path")
     region = state.get("region")
     if DEBUG:
-        print(f"[DEBUG] bam_agent: intent={intent}, bam_path={bam_path}, region={region}")
-    if not bam_path or not region:
+        print(f"[DEBUG] bam_agent: intent={intent}, region={region}")
+    
+    # Check if we need to require a region
+    if not region:
         if intent in ["view_region", "analyze_coverage", "analyze_reads", "analyze_variant"]:
-            state["response"] = "Please provide a BAM path and a genomic region to analyze."
+            state["response"] = "Please provide a genomic region to analyze."
             state["halt"] = True
             if DEBUG:
-                print(f"[DEBUG] bam_agent: missing bam_path or region, halting")
+                print(f"[DEBUG] bam_agent: missing region, halting")
         return state
-    try:
+    
+    # Get tracks to process — support both multi-BAM and single-BAM (backward compat)
+    bam_tracks = state.get("bam_tracks", [])
+    
+    # If no multi-BAM tracks but single bam_path exists, wrap it for backward compat
+    if not bam_tracks and state.get("bam_path"):
+        bam_tracks = [
+            {
+                "bam_path": state.get("bam_path"),
+                "sample_name": "sample_1"
+            }
+        ]
+        state["bam_tracks"] = bam_tracks
         if DEBUG:
-            print(f"[DEBUG] bam_agent: calling get_coverage")
-        coverage = get_coverage(bam_path, region)
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: coverage={coverage[:2]}... (total {len(coverage)})")
-        reads = get_reads(bam_path, region)
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: reads={reads[:2]}... (total {len(reads)})")
-        state["coverage"] = coverage
-        state["reads"] = reads
-    except Exception as e:
-        state["response"] = f"Error loading BAM data: {str(e)}"
-        state["halt"] = True
-        if DEBUG:
-            print(f"[DEBUG] bam_agent: exception: {e}")
+            print(f"[DEBUG] bam_agent: wrapped single bam_path as 1-element bam_tracks")
+    
+    # If still no tracks, halt
+    if not bam_tracks:
+        if intent in ["view_region", "analyze_coverage", "analyze_reads", "analyze_variant"]:
+            state["response"] = "Please provide a BAM path or BAM tracks to analyze."
+            state["halt"] = True
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: no bam_tracks, halting")
         return state
+    
+    # Determine which samples are active
+    active_sample_names = state.get("active_sample_names", [])
+    if not active_sample_names:
+        # Default: all samples are active
+        active_sample_names = [
+            (track.get("sample_name") if isinstance(track, dict) else getattr(track, "sample_name", None))
+            or f"sample_{i}"
+            for i, track in enumerate(bam_tracks)
+        ]
+        state["active_sample_names"] = active_sample_names
+    
+    if DEBUG:
+        print(f"[DEBUG] bam_agent: processing {len(bam_tracks)} tracks, active: {active_sample_names}")
+    
+    # Process each track independently with error isolation
+    per_track_results: Dict[str, Any] = {}
+    analyzed_sample_names: list[str] = []
+    
+    for track in bam_tracks:
+        # Extract track info (handle both dict and TypedDict)
+        if isinstance(track, dict):
+            sample_name = track.get("sample_name", "unknown")
+            bam_path = track.get("bam_path", "")
+        else:
+            # Assume BamTrack TypedDict-like object
+            sample_name = getattr(track, "sample_name", "unknown")
+            bam_path = getattr(track, "bam_path", "")
+        
+        # Skip inactive samples
+        if sample_name not in active_sample_names:
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: skipping inactive sample {sample_name}")
+            continue
+        
+        if DEBUG:
+            print(f"[DEBUG] bam_agent: processing sample={sample_name}, bam_path={bam_path}")
+        
+        try:
+            # Fetch coverage and reads for this track
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: calling get_coverage for {sample_name}")
+            coverage = get_coverage(bam_path, region)
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: coverage for {sample_name}={coverage[:2] if coverage else []}... (total {len(coverage)})")
+            
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: calling get_reads for {sample_name}")
+            reads = get_reads(bam_path, region)
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: reads for {sample_name}={reads[:2] if reads else []}... (total {len(reads)})")
+            
+            # Store per-track results
+            per_track_results[sample_name] = {
+                "bam_path": bam_path,
+                "sample_name": sample_name,
+                "coverage": coverage,
+                "reads": reads,
+                "error": None
+            }
+            analyzed_sample_names.append(sample_name)
+        
+        except FileNotFoundError as e:
+            # BAM file or index not found — isolate error and continue
+            error_msg = str(e)
+            per_track_results[sample_name] = {
+                "bam_path": bam_path,
+                "sample_name": sample_name,
+                "coverage": [],
+                "reads": [],
+                "error": error_msg,
+                "error_type": "missing_file"
+            }
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: FileNotFoundError for {sample_name}: {error_msg}")
+        
+        except ValueError as e:
+            # Bad region or parsing error
+            error_msg = str(e)
+            per_track_results[sample_name] = {
+                "bam_path": bam_path,
+                "sample_name": sample_name,
+                "coverage": [],
+                "reads": [],
+                "error": error_msg,
+                "error_type": "bad_region"
+            }
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: ValueError for {sample_name}: {error_msg}")
+        
+        except Exception as e:
+            # Generic error
+            error_msg = f"Error processing BAM: {str(e)}"
+            per_track_results[sample_name] = {
+                "bam_path": bam_path,
+                "sample_name": sample_name,
+                "coverage": [],
+                "reads": [],
+                "error": error_msg,
+                "error_type": "parse_error"
+            }
+            if DEBUG:
+                print(f"[DEBUG] bam_agent: exception for {sample_name}: {e}")
+    
+    # Store per-track results in state
+    state["per_track_results"] = per_track_results
+    
+    # Backward compat: expose first analyzed sample at top level
+    if analyzed_sample_names:
+        first_sample = analyzed_sample_names[0]
+        first_result = per_track_results[first_sample]
+        state["coverage"] = first_result.get("coverage", [])
+        state["reads"] = first_result.get("reads", [])
+        if DEBUG:
+            print(f"[DEBUG] bam_agent: backward compat: exposed first sample {first_sample} at top level")
+    else:
+        # All tracks failed
+        state["coverage"] = []
+        state["reads"] = []
+        # Don't halt yet — downstream agents can decide what to do
+        if DEBUG:
+            print(f"[DEBUG] bam_agent: no successfully analyzed samples")
+    
     return state
 
 
-def variant_agent(state: ChatState) -> ChatState:
-    """Infer SV presence/type from read-level and coverage-level evidence."""
-    if state.get("halt"):
-        return state
-
-    reads = state.get("reads", [])
-    coverage = state.get("coverage", [])
-    region = state.get("region", "")
-
+def _analyze_variant_for_reads_coverage(reads: list[Dict[str, Any]], coverage: list[Dict[str, Any]], region: str) -> Dict[str, Any]:
+    """Analyze variant evidence from reads and coverage data. Shared logic for per-track and backward-compat analysis."""
     if not reads:
-        state["variant_assessment"] = {
+        return {
             "sv_present": False,
             "sv_type": "none",
             "confidence": 0.0,
             "evidence": ["No reads available in current region window."],
             "metrics": {"read_count": 0, "region": region},
         }
-        return state
 
     region_contig = region.split(":", 1)[0] if region else ""
     read_count = len(reads)
@@ -454,7 +578,7 @@ def variant_agent(state: ChatState) -> ChatState:
     if not evidence:
         evidence.append("No strong discordant-read or coverage signature was detected.")
 
-    state["variant_assessment"] = {
+    return {
         "sv_present": sv_present,
         "sv_type": sv_type,
         "confidence": round(min(1.0, top_score), 2),
@@ -482,59 +606,301 @@ def variant_agent(state: ChatState) -> ChatState:
         },
         "scores": {key: round(value, 2) for key, value in scores.items()},
     }
+
+
+def variant_agent(state: ChatState) -> ChatState:
+    """Infer SV presence/type from read-level and coverage-level evidence for each BAM independently."""
+    if state.get("halt"):
+        return state
+
+    region = state.get("region", "")
+    per_track_results = state.get("per_track_results", {})
+    
+    # If we have per-track results, analyze each track independently
+    if per_track_results:
+        if DEBUG:
+            print(f"[DEBUG] variant_agent: analyzing {len(per_track_results)} tracks independently")
+        
+        first_successful_assessment = None
+        
+        for sample_name, track_result in per_track_results.items():
+            # Skip tracks with errors
+            if track_result.get("error"):
+                if DEBUG:
+                    print(f"[DEBUG] variant_agent: skipping {sample_name} due to error: {track_result.get('error')}")
+                continue
+            
+            # Extract reads and coverage for this track
+            reads = track_result.get("reads", [])
+            coverage = track_result.get("coverage", [])
+            
+            if DEBUG:
+                print(f"[DEBUG] variant_agent: analyzing {sample_name} with {len(reads)} reads, {len(coverage)} coverage points")
+            
+            # Analyze variant evidence for this track
+            variant_assessment = _analyze_variant_for_reads_coverage(reads, coverage, region)
+            
+            # Store per-track variant assessment
+            track_result["variant_assessment"] = variant_assessment
+            
+            # Log per-track SV evidence for observability
+            sv_type = variant_assessment.get("sv_type", "none")
+            confidence = variant_assessment.get("confidence", 0.0)
+            evidence_summary = "; ".join(variant_assessment.get("evidence", [])[:3])
+            if DEBUG:
+                print(f"[DEBUG] variant_agent: {sample_name} SV={sv_type} (conf={confidence}): {evidence_summary}")
+            
+            # Save first successful assessment for backward compat
+            if first_successful_assessment is None:
+                first_successful_assessment = variant_assessment
+        
+        # Backward compat: expose first successful track's assessment at top level
+        if first_successful_assessment is not None:
+            state["variant_assessment"] = first_successful_assessment
+            if DEBUG:
+                print(f"[DEBUG] variant_agent: backward compat: exposed first assessment at top level")
+        else:
+            # All tracks had errors or no data
+            state["variant_assessment"] = {
+                "sv_present": False,
+                "sv_type": "none",
+                "confidence": 0.0,
+                "evidence": ["No successful BAM analysis available."],
+                "metrics": {"read_count": 0, "region": region},
+            }
+            if DEBUG:
+                print(f"[DEBUG] variant_agent: no successful tracks, using empty assessment")
+    else:
+        # Fallback for backward compat: single-BAM path (no per_track_results yet)
+        reads = state.get("reads", [])
+        coverage = state.get("coverage", [])
+        
+        if DEBUG:
+            print(f"[DEBUG] variant_agent: backward compat analysis with {len(reads)} reads")
+        
+        state["variant_assessment"] = _analyze_variant_for_reads_coverage(reads, coverage, region)
+    
     return state
 
 
 def response_agent(state: ChatState) -> ChatState:
-    """Generate intelligent responses based on intent and data"""
+    """Generate intelligent responses with per-track summaries and comparative insights across multiple samples"""
     if state.get("halt"):
         return state
     
     message = state.get("message", "")
     intent = state.get("intent", "unknown")
-    coverage = state.get("coverage", [])
-    reads = state.get("reads", [])
     region = state.get("region", "")
-    variant_assessment = state.get("variant_assessment", {})
+    
+    # Get per-track results if available; otherwise fall back to backward compat
+    per_track_results = state.get("per_track_results", {})
+    active_sample_names = state.get("active_sample_names", [])
+    
+    if DEBUG:
+        print(f"[DEBUG] response_agent: per_track_results={list(per_track_results.keys())}, active={active_sample_names}")
+    
+    # Build per-track summaries
+    track_summaries: Dict[str, Dict[str, Any]] = {}
+    analyzed_samples: list[str] = []
+    
+    if per_track_results:
+        # Multi-BAM path: build summaries for each active track
+        for sample_name, track_result in per_track_results.items():
+            # Filter to active samples
+            if active_sample_names and sample_name not in active_sample_names:
+                if DEBUG:
+                    print(f"[DEBUG] response_agent: skipping inactive sample {sample_name}")
+                continue
+            
+            # Check for error
+            if track_result.get("error"):
+                if DEBUG:
+                    print(f"[DEBUG] response_agent: skipping {sample_name} due to error: {track_result.get('error')}")
+                track_summaries[sample_name] = {
+                    "error": track_result.get("error"),
+                    "error_type": track_result.get("error_type"),
+                    "coverage_stats": None,
+                    "read_count": 0,
+                    "variant_assessment": None,
+                }
+                continue
+            
+            # Extract coverage and reads for this track
+            coverage = track_result.get("coverage", [])
+            reads = track_result.get("reads", [])
+            variant_assessment = track_result.get("variant_assessment", {})
+            
+            # Build summary for this track
+            coverage_stats = summarize_coverage(coverage) if coverage else {}
+            read_count = len(reads)
+            
+            track_summaries[sample_name] = {
+                "coverage_stats": coverage_stats,
+                "read_count": read_count,
+                "coverage_count": len(coverage),
+                "variant_assessment": variant_assessment,
+                "error": None,
+            }
+            analyzed_samples.append(sample_name)
+            
+            if DEBUG:
+                print(f"[DEBUG] response_agent: {sample_name}: cov_mean={coverage_stats.get('mean', 0):.1f}, reads={read_count}, sv={variant_assessment.get('sv_type')}")
     
     if not USE_LLM:
-        # Simple fallback response
-        summary = summarize_coverage(coverage)
-        if variant_assessment:
-            presence = "present" if variant_assessment.get("sv_present") else "not clearly present"
-            sv_type = variant_assessment.get("sv_type", "none")
-            state["response"] = (
-                f"Region {region} loaded. Coverage range {summary['min']}-{summary['max']}, mean {summary['mean']}. "
-                f"SV signal is {presence}; likely type: {sv_type}."
-            )
+        # Simple fallback response (backward compat + multi-track)
+        if track_summaries:
+            # Multi-BAM summary (including both analyzed and errored samples)
+            response_lines = []
+            
+            # Add analyzed samples
+            if analyzed_samples:
+                samples_str = ", ".join(analyzed_samples)
+                response_lines.append(f"Analyzed samples: {samples_str}")
+                for sample_name in analyzed_samples:
+                    summary_info = track_summaries[sample_name]
+                    cov_stats = summary_info.get("coverage_stats", {})
+                    if cov_stats:
+                        response_lines.append(
+                            f"{sample_name}: Coverage {cov_stats.get('min', 0)}-{cov_stats.get('max', 0)} "
+                            f"(mean {cov_stats.get('mean', 0):.1f}), {summary_info.get('read_count')} reads"
+                        )
+            
+            # Add error samples
+            error_samples = {name: info for name, info in track_summaries.items() if info.get("error")}
+            if error_samples:
+                if analyzed_samples:
+                    response_lines.append("Errors:")
+                for sample_name, error_info in error_samples.items():
+                    response_lines.append(
+                        f"{sample_name}: {error_info.get('error')} ({error_info.get('error_type', 'unknown')})"
+                    )
+            
+            state["response"] = "; ".join(response_lines)
         else:
-            state["response"] = (
-                f"Region {region} loaded. Coverage range {summary['min']}-{summary['max']}, "
-                f"mean {summary['mean']}. Showing {len(reads)} reads."
-            )
+            # Backward compat single-BAM path
+            coverage = state.get("coverage", [])
+            reads = state.get("reads", [])
+            variant_assessment = state.get("variant_assessment", {})
+            summary = summarize_coverage(coverage)
+            if variant_assessment:
+                presence = "present" if variant_assessment.get("sv_present") else "not clearly present"
+                sv_type = variant_assessment.get("sv_type", "none")
+                state["response"] = (
+                    f"Region {region} loaded. Coverage range {summary['min']}-{summary['max']}, mean {summary['mean']}. "
+                    f"SV signal is {presence}; likely type: {sv_type}."
+                )
+            else:
+                state["response"] = (
+                    f"Region {region} loaded. Coverage range {summary['min']}-{summary['max']}, "
+                    f"mean {summary['mean']}. Showing {len(reads)} reads."
+                )
         return state
     
     # Use LLM for intelligent responses
     llm = ChatOpenAI(model=MODEL_NAME, temperature=0.3, base_url=BASE_URL, api_key=SecretStr(API_KEY) if API_KEY else None)
     
-    # Build context based on available data
+    # Build context for LLM with per-track summaries and comparative insights
     context_parts = []
     
     if region:
         context_parts.append(f"Genomic region: {region}")
     
-    if coverage:
-        summary = summarize_coverage(coverage)
-        context_parts.append(
-            f"Coverage statistics: min={summary['min']}, max={summary['max']}, mean={summary['mean']:.2f}"
-        )
-        context_parts.append(f"Total coverage points: {len(coverage)}")
-    
-    if reads:
-        context_parts.append(f"Number of reads: {len(reads)}")
+    if track_summaries and analyzed_samples:
+        # Multi-BAM context: per-track summaries + comparative
+        context_parts.append(f"\nAnalyzed samples: {', '.join(analyzed_samples)}")
+        context_parts.append("\nPer-track data:")
         
-        # Calculate read statistics
+        coverage_means = {}
+        read_counts = {}
+        sv_types = {}
+        
+        for sample_name in analyzed_samples:
+            summary_info = track_summaries[sample_name]
+            cov_stats = summary_info.get("coverage_stats", {})
+            read_count = summary_info.get("read_count", 0)
+            variant_assess = summary_info.get("variant_assessment", {})
+            
+            read_counts[sample_name] = read_count
+            sv_types[sample_name] = variant_assess.get("sv_type", "none")
+            
+            if cov_stats:
+                mean_cov = cov_stats.get("mean", 0)
+                coverage_means[sample_name] = mean_cov
+                context_parts.append(
+                    f"  {sample_name}: coverage {cov_stats.get('min')}-{cov_stats.get('max')} "
+                    f"(mean={mean_cov:.2f}), {read_count} reads, {cov_stats.get('num_points')} coverage points"
+                )
+            else:
+                context_parts.append(f"  {sample_name}: no coverage data")
+            
+            if variant_assess:
+                context_parts.append(
+                    f"    {sample_name} variant: sv_present={variant_assess.get('sv_present')}, "
+                    f"type={variant_assess.get('sv_type')}, confidence={variant_assess.get('confidence'):.2f}"
+                )
+                evidence = variant_assess.get("evidence", [])
+                if evidence:
+                    context_parts.append(f"      Evidence: {'; '.join(evidence[:2])}")
+        
+        # Add comparative insights
+        if len(analyzed_samples) > 1:
+            context_parts.append("\nComparative insights:")
+            
+            # Coverage comparison
+            if coverage_means:
+                sorted_by_cov = sorted(coverage_means.items(), key=lambda x: x[1], reverse=True)
+                if len(sorted_by_cov) > 1:
+                    highest = sorted_by_cov[0]
+                    lowest = sorted_by_cov[-1]
+                    ratio = highest[1] / max(lowest[1], 0.001)
+                    context_parts.append(
+                        f"  Coverage: {highest[0]} has highest mean coverage ({highest[1]:.2f}), "
+                        f"{lowest[0]} has lowest ({lowest[1]:.2f}), ratio {ratio:.1f}x"
+                    )
+            
+            # Read count comparison
+            if read_counts:
+                sorted_by_reads = sorted(read_counts.items(), key=lambda x: x[1], reverse=True)
+                if len(sorted_by_reads) > 1:
+                    highest = sorted_by_reads[0]
+                    lowest = sorted_by_reads[-1]
+                    context_parts.append(
+                        f"  Reads: {highest[0]} has {highest[1]} reads, {lowest[0]} has {lowest[1]} reads"
+                    )
+            
+            # SV type comparison
+            sv_type_groups = {}
+            for sample_name, sv_type in sv_types.items():
+                if sv_type not in sv_type_groups:
+                    sv_type_groups[sv_type] = []
+                sv_type_groups[sv_type].append(sample_name)
+            if len(sv_type_groups) > 1:
+                sv_summary = "; ".join(f"{sv_type}: {', '.join(samples)}" for sv_type, samples in sv_type_groups.items())
+                context_parts.append(f"  SV signals: {sv_summary}")
+        
+        # Add error info
+        errors = {name: info for name, info in track_summaries.items() if info.get("error")}
+        if errors:
+            context_parts.append("\nErrors encountered:")
+            for sample_name, error_info in errors.items():
+                context_parts.append(f"  {sample_name}: {error_info.get('error')} ({error_info.get('error_type')})")
+    else:
+        # Backward compat single-BAM path
+        coverage = state.get("coverage", [])
+        reads = state.get("reads", [])
+        variant_assessment = state.get("variant_assessment", {})
+        
+        if coverage:
+            summary = summarize_coverage(coverage)
+            context_parts.append(
+                f"Coverage statistics: min={summary['min']}, max={summary['max']}, mean={summary['mean']:.2f}"
+            )
+            context_parts.append(f"Total coverage points: {len(coverage)}")
+        
         if reads:
+            context_parts.append(f"Number of reads: {len(reads)}")
+            
+            # Calculate read statistics
             read_lengths = [r['end'] - r['start'] for r in reads if r.get('end') and r.get('start')]
             if read_lengths:
                 avg_len = sum(read_lengths) / len(read_lengths)
@@ -550,19 +916,19 @@ def response_agent(state: ChatState) -> ChatState:
                 avg_mapq = sum(mapq_values) / len(mapq_values)
                 context_parts.append(f"Average mapping quality: {avg_mapq:.1f}")
 
-    if variant_assessment:
-        context_parts.append(
-            f"Variant assessment: present={variant_assessment.get('sv_present')}, "
-            f"type={variant_assessment.get('sv_type')}, confidence={variant_assessment.get('confidence')}"
-        )
-        evidence = variant_assessment.get("evidence", [])
-        if evidence:
-            context_parts.append("Variant evidence:\n- " + "\n- ".join(evidence))
-        
-        metrics = variant_assessment.get("metrics", {})
-        if metrics:
-            metrics_str = ", ".join(f"{k}={v}" for k, v in metrics.items())
-            context_parts.append(f"Metrics: {metrics_str}")
+        if variant_assessment:
+            context_parts.append(
+                f"Variant assessment: present={variant_assessment.get('sv_present')}, "
+                f"type={variant_assessment.get('sv_type')}, confidence={variant_assessment.get('confidence')}"
+            )
+            evidence = variant_assessment.get("evidence", [])
+            if evidence:
+                context_parts.append("Variant evidence:\n- " + "\n- ".join(evidence))
+            
+            metrics = variant_assessment.get("metrics", {})
+            if metrics:
+                metrics_str = ", ".join(f"{k}={v}" for k, v in metrics.items())
+                context_parts.append(f"Metrics: {metrics_str}")
     
     context = "\n".join(context_parts) if context_parts else "No data available."
     
@@ -578,6 +944,12 @@ When analyzing data:
 - Be conversational but accurate
 - Keep responses focused and actionable
 
+When analyzing MULTIPLE samples:
+- Reference sample names explicitly (e.g., "Sample A has higher coverage than Sample B")
+- Highlight comparative insights (coverage differences, variant type variations, read count disparities)
+- Clearly indicate which samples were analyzed
+- Note any samples with errors separately
+
 When variant evidence exists, explicitly answer:
 1) whether SV evidence is present
 2) most likely SV type (INS/DEL/DUP/INV/BND) or uncertain
@@ -592,7 +964,7 @@ Intent: {intent}
 Available data:
 {context}
 
-Provide a helpful response to the user's question."""
+Provide a helpful response to the user's question. When multiple samples are analyzed, focus on comparative insights."""
     
     try:
         response = llm.invoke([
@@ -602,8 +974,22 @@ Provide a helpful response to the user's question."""
         state["response"] = _content_to_text(response.content)
     except Exception as e:
         print(f"LLM response generation failed: {e}")
-        # Fallback
-        if coverage:
+        # Fallback with multi-track info
+        if track_summaries and analyzed_samples:
+            samples_str = ", ".join(analyzed_samples)
+            fallback_parts = [f"Analyzed samples {samples_str} in region {region}:"]
+            for sample_name in analyzed_samples:
+                summary_info = track_summaries[sample_name]
+                cov_stats = summary_info.get("coverage_stats", {})
+                if cov_stats:
+                    fallback_parts.append(
+                        f"  {sample_name}: Coverage {cov_stats.get('min', 0)}-{cov_stats.get('max', 0)} "
+                        f"(mean {cov_stats.get('mean', 0):.1f}), {summary_info.get('read_count')} reads"
+                    )
+            state["response"] = "; ".join(fallback_parts)
+        elif state.get("coverage"):
+            coverage = state.get("coverage", [])
+            reads = state.get("reads", [])
             summary = summarize_coverage(coverage)
             state["response"] = (
                 f"Region {region}: Coverage {summary['min']}-{summary['max']} "
@@ -611,6 +997,9 @@ Provide a helpful response to the user's question."""
             )
         else:
             state["response"] = "I understood your question but couldn't generate a detailed response. Please try again."
+    
+    if DEBUG:
+        print(f"[DEBUG] response_agent: response generated, samples analyzed: {analyzed_samples}")
     
     return state
 
