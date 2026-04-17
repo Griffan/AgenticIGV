@@ -35,11 +35,17 @@ A LangGraph-powered, multi-agent chat assistant for visualizing BAM alignment fi
    cp .env.example .env
 
 ## Run
-Start the API server:
 
-uvicorn app.main:app --reload
+### Start the API server:
 
+uvicorn app.main:app --reload --port 8000
+
+### SSH Tunneling (optional if running on a remote server):
+ssh -L 8000:localhost:8000 user@remote-server-address
+
+### Access the UI:
 Open http://localhost:8000 in your browser.
+
 
 ## Usage
 1. Choose mode:
