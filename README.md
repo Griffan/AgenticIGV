@@ -20,34 +20,48 @@ A LangGraph-powered, multi-agent chat assistant for visualizing BAM alignment fi
 - Optional: FASTA reference file with .fai index for nucleotide display
 
 ## Setup
+
 1. Create a virtual environment:
 
+```{bash}
     python -m venv .venv
-    
+```
+
+```{bash}
     source .venv/bin/activate
+```
 
 2. Install dependencies:
-   
+
+```{bash}
    pip install -r requirements.txt
+```
 
 3. Copy environment template and add your key (optional for basic summaries):
 
+```{bash}
    cp .env.example .env
+```
 
 ## Run
 
-### Start the API server
+1. Start the API server
 
+```{bash}
 uvicorn app.main:app --reload --port 8000
+```
 
-### SSH Tunneling (optional if running on a remote server)
+2. SSH Tunneling (optional if running on a remote server)
 
+```{bash}
 ssh -L 8000:localhost:8000 user@remote-server-address
+```
 
-### Access the UI
+3. Access the UI
 
+```{bash}
 Open http://localhost:8000 in your browser.
-
+```
 
 ## Usage
 1. Choose mode:
