@@ -1,0 +1,44 @@
+name: Tests
+
+'on':
+  pull_request:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  test:
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.pull_request != null &&
+       (contains(github.event.comment.body, 'retest') ||
+        contains(github.event.comment.body, 'Retest')))
+    
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Log trigger context
+      run: |
+        echo "Event: ${{ github.event_name }}"
+        echo "PR: ${{ github.event.pull_request != null }}"
+        if [ "${{ github.event_name }}" = "issue_comment" ]; then
+          echo "Comment: ${{ github.event.comment.body }}"
+        fi
+    
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies from requirements.txt
+      run: pip install -r requirements.txt
+
+    - name: Install pytest
+      run: pip install pytest
+
+    - name: Run tests
+      run: PYTHONPATH=. pytest tests/ -v --tb=short

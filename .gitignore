@@ -6,6 +6,7 @@ __pycache__/
 
 # ── Github Copilot Instructions ──
 .github/copilot-instructions.md
+.artifacts/
 
 # ── GSD baseline (auto-generated) ──
 .gsd
