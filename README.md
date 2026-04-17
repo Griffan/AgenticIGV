@@ -1,5 +1,6 @@
 # Agentic IGV
 
+<!-- T01 Test PR: Workflow verification test -->
 A LangGraph-powered, multi-agent chat assistant for visualizing BAM alignment files. Load a region, inspect coverage and read pileups, and ask for context in natural language.
 
 ## Features
