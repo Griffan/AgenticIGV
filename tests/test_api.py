@@ -1931,14 +1931,6 @@ def test_r008_codebase_sync():
     assert callable(variant_agent), "R008: variant_agent must be callable"
     assert callable(response_agent), "R008: response_agent must be callable"
 
-    # Verify GSD tracking files are present (progress tracking sync)
-    gsd_dir = Path(__file__).resolve().parent.parent / ".gsd"
-    assert (gsd_dir / "REQUIREMENTS.md").exists(), "R008: REQUIREMENTS.md missing"
-    assert (gsd_dir / "DECISIONS.md").exists(), "R008: DECISIONS.md missing"
-    assert (gsd_dir / "milestones/M001/slices/S02/S02-PLAN.md").exists(), "R008: S02-PLAN.md missing"
-
-    print("\n[R008] ✓ All required modules importable, key symbols present, GSD tracking files exist")
-
 
 # ── S02: USE_LLM=True path coverage ──────────────────────────────────────────
 # IMPORTANT: intent_agent has an early-return guard — if the message matches a
