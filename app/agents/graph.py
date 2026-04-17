@@ -4,18 +4,15 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import SecretStr
 from langgraph.graph import END, StateGraph
 
 from app.agents.state import ChatState
 from app.services.bam import get_coverage, get_reads, summarize_coverage
-
+from app.llm import get_llm_model
 
 
 # Debug flag (set AGENTIC_IGV_DEBUG=1 to enable debug prints)
-import os
 DEBUG = os.getenv("AGENTIC_IGV_DEBUG", "0") == "1"
 
 # Load environment variables from project root
@@ -25,9 +22,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 REGION_FINDER = re.compile(r"([\w.-]+:\d+[-\.]{1,2}\d+)")
 CONTIG_FINDER = re.compile(r"\b(chr\w+|\d+)\b", re.IGNORECASE)
 BAM_PATH_FINDER = re.compile(r"([~\w./-]+\.bam)\b", re.IGNORECASE)
-MODEL_NAME = os.getenv("LANGGRAPH_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("BASE_URL", "https://api.openai.com/v1")
-API_KEY = os.getenv("OPENAI_API_KEY")
 USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
 VARIANT_KEYWORDS = re.compile(
     r"\b(sv|structural variant|variant|deletion|insertion|duplication|inversion|translocation|breakpoint|fusion)\b",
@@ -228,7 +222,7 @@ def intent_agent(state: ChatState) -> ChatState:
             state["intent"] = "view_region"
         return state
     # Use LLM to understand intent
-    llm = ChatOpenAI(model=MODEL_NAME, temperature=0, base_url=BASE_URL, api_key=SecretStr(API_KEY) if API_KEY else None)
+    llm = get_llm_model()
     system_prompt = """You are an assistant helping users explore BAM alignment files and adjust IGV.js visualization settings.
 
 Analyze the user's message and determine their intent.
@@ -738,7 +732,7 @@ def response_agent(state: ChatState) -> ChatState:
         return state
     
     # Use LLM for intelligent responses
-    llm = ChatOpenAI(model=MODEL_NAME, temperature=0.3, base_url=BASE_URL, api_key=SecretStr(API_KEY) if API_KEY else None)
+    llm = get_llm_model()
     
     # Build context for LLM with per-track summaries and comparative insights
     context_parts = []

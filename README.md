@@ -48,6 +48,7 @@ Open http://localhost:8000 in your browser.
 2. Enter a region (example: `20:59000-61000` or `chr1:1000-2000`).
 3. Click "Load region" to populate tracks.
 - **Chat with your data**: Ask questions like:
+  - "Load "resource/test.bam" and "resource/test2.bam" in region 20:56000-65000"
   - "Show me region 20:59000-61000"
   - "What's the coverage like?"
   - "How many reads are there?"

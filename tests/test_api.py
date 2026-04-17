@@ -282,7 +282,7 @@ def test_chat_edge_mode_rejects_invalid_item_schema(monkeypatch):
 
 def test_chat_edge_mode_real_graph_integration(monkeypatch):
     if graph_module.USE_LLM:
-        monkeypatch.setattr(graph_module, "ChatOpenAI", _FakeLLM)
+        monkeypatch.setattr(graph_module, "get_llm_model", lambda: _FakeLLM())
 
     client = TestClient(main.app)
     response = client.post(
@@ -393,7 +393,7 @@ def test_smoke_resource_chat_path_mode(monkeypatch):
     assert RESOURCE_BAM.exists(), f"Missing smoke fixture: {RESOURCE_BAM}"
 
     if graph_module.USE_LLM:
-        monkeypatch.setattr(graph_module, "ChatOpenAI", _FakeLLM)
+        monkeypatch.setattr(graph_module, "get_llm_model", lambda: _FakeLLM())
 
     client = TestClient(main.app)
     response = client.post(
@@ -527,7 +527,7 @@ def test_chat_path_and_edge_parity(monkeypatch):
     assert RESOURCE_BAM.exists(), f"Missing smoke fixture: {RESOURCE_BAM}"
 
     if graph_module.USE_LLM:
-        monkeypatch.setattr(graph_module, "ChatOpenAI", _FakeLLM)
+        monkeypatch.setattr(graph_module, "get_llm_model", lambda: _FakeLLM())
 
     region = "20:59000-61000"
     client = TestClient(main.app)
@@ -1316,7 +1316,7 @@ def test_no_data_upload(monkeypatch):
 
     # Force LLM path to be active (patch USE_LLM=True) but intercept at ChatOpenAI
     monkeypatch.setattr(graph_module, "USE_LLM", True)
-    monkeypatch.setattr(graph_module, "ChatOpenAI", _CapturingFakeLLM)
+    monkeypatch.setattr(graph_module, "get_llm_model", lambda: _CapturingFakeLLM())
 
     client = TestClient(main.app)
     response = client.post(
@@ -1963,7 +1963,7 @@ def test_intent_agent_llm_igv_params_extracted(monkeypatch):
                 content='{"intent": "adjust_igv", "region": null, "igv_params": {"trackHeight": 200}, "preset": null, "reasoning": "test"}'
             )
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMParams)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMParams())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -1998,7 +1998,7 @@ def test_intent_agent_llm_builtin_preset_applied(monkeypatch):
                 content='{"intent": "adjust_igv", "region": null, "igv_params": {}, "preset": "sv", "reasoning": "sv preset"}'
             )
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMPreset)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMPreset())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2033,7 +2033,7 @@ def test_intent_agent_llm_user_preset_applied(monkeypatch):
                 content='{"intent": "adjust_igv", "region": null, "igv_params": {}, "preset": "my_sv", "reasoning": "user preset"}'
             )
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMUserPreset)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMUserPreset())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2069,7 +2069,7 @@ def test_intent_agent_llm_unknown_preset_feedback(monkeypatch):
                 content='{"intent": "adjust_igv", "region": null, "igv_params": {}, "preset": "nosuchpreset", "reasoning": "unknown"}'
             )
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMUnknownPreset)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMUnknownPreset())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2102,7 +2102,7 @@ def test_intent_agent_llm_exception_fallback(monkeypatch):
         def invoke(self, messages):
             raise ValueError("boom")
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMRaises)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMRaises())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2135,7 +2135,7 @@ def test_response_agent_llm_path(monkeypatch):
         def invoke(self, messages):
             return SimpleNamespace(content="Test LLM response from response_agent.")
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMResponse)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMResponse())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2167,7 +2167,7 @@ def test_response_agent_llm_exception_fallback(monkeypatch):
         def invoke(self, messages):
             raise RuntimeError("LLM unavailable")
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMResponseRaises)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMResponseRaises())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2197,7 +2197,7 @@ def test_intent_agent_llm_region_extracted_from_llm(monkeypatch):
                 content='{"intent": "view_region", "region": "chr1:100-200", "igv_params": {}, "preset": null, "reasoning": "region test"}'
             )
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMRegion)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMRegion())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {
@@ -2227,7 +2227,7 @@ def test_intent_agent_llm_exception_fallback_no_region(monkeypatch):
         def invoke(self, messages):
             raise ValueError("no region fallback")
 
-    monkeypatch.setattr(gm, "ChatOpenAI", _FakeLLMRaisesNoRegion)
+    monkeypatch.setattr(gm, "get_llm_model", lambda: _FakeLLMRaisesNoRegion())
     monkeypatch.setattr(gm, "USE_LLM", True)
 
     state = {

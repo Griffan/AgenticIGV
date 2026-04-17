@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .agents.graph import build_graph
+from .llm import validate_llm_config
 from .services.bam import get_coverage, get_reads
 from .services.chat_contracts import ChatContract, ContractError, normalize_chat_request
 import pysam
@@ -24,23 +26,29 @@ STATIC_DIR = APP_ROOT / "ui" / "static"
 
 app = FastAPI(title="Agentic IGV")
 
-
 # Debug flag (set AGENTIC_IGV_DEBUG=1 to enable debug prints)
 DEBUG = os.getenv("AGENTIC_IGV_DEBUG", "0") == "1"
 
-# Log LLM status on startup
-llm_enabled = bool(os.getenv("OPENAI_API_KEY"))
-MODEL_NAME = os.getenv("LANGGRAPH_MODEL", "gpt-4o-mini")
-BASE_URL = os.getenv("BASE_URL", "https://api.openai.com/v1")
-API_KEY = os.getenv("OPENAI_API_KEY")
-USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
-if DEBUG:
-    print(f"\n{'='*60}")
-    print("Agentic IGV Starting")
-    print(f"LLM Chat: {'ENABLED ✓' if llm_enabled else 'DISABLED (set OPENAI_API_KEY to enable)'}")
-    print(f"LLM Model: {MODEL_NAME}")
-    print(f"LLM Base URL: {BASE_URL}")
-    print(f"{'='*60}\n")
+# Track whether LLM config has been validated
+_llm_config_validated = False
+
+@app.on_event("startup")
+async def startup_event():
+    """Validate LLM configuration on app startup"""
+    global _llm_config_validated
+    try:
+        backend_name, model_info = validate_llm_config()
+        _llm_config_validated = True
+        if DEBUG:
+            print(f"\n{'='*60}")
+            print("Agentic IGV Starting")
+            print(f"LLM Backend: {backend_name}")
+            print(f"{model_info}")
+            print(f"{'='*60}\n")
+    except (ValueError, ImportError) as e:
+        print(f"ERROR: LLM configuration invalid: {e}", file=sys.stderr)
+        raise
+
 
 # Add CORS middleware for IGV.js access
 app.add_middleware(
