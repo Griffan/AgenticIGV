@@ -33,3 +33,5 @@ vendor/
 coverage/
 .cache/
 tmp/
+.claude/
+.agents/

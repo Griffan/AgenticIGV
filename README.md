@@ -79,7 +79,7 @@ Open http://localhost:8000 in your browser.
 
 **Quick test with sample BAM:**
 ```
-BAM: /home/griffan/LinuxStorage/Download/GitRepos/VerifyBamID/resource/test/test.bam
+BAM: resource/test/test.bam
 Region: 20:59000-61000
 Chat: "Analyze the coverage in this region"
 ```
