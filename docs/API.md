@@ -1,149 +1,165 @@
-<!-- generated-by: gsd-doc-writer -->
 # API Reference
 
-This document provides a reference for all public API endpoints, classes, and methods in the AgenticIGV project. All information is verified directly from the codebase.
+This document describes the current public backend contract for AgenticIGV, with emphasis on the typed `/api/chat` response boundary consumed by the frontend.
 
-## HTTP API Endpoints
-
-### `GET /`
-- **Description:** Serves the main static HTML page.
-- **Response:** HTML file
+## Endpoints
 
 ### `GET /api/health`
-- **Description:** Health check endpoint.
-- **Response:** `{ "status": "ok" }`
+Returns service status.
 
-### `GET /api/bam/chromosomes?bam_path=...`
-- **Description:** Returns chromosome/contig information from a BAM file header.
-- **Query Parameters:**
-  - `bam_path` (str, required): Path to the BAM file.
-- **Response:** `{ "chromosomes": [ { "name": str, "length": int, "index": int }, ... ] }`
-- **Errors:** 404 if BAM file not found, 400 for other errors.
+```json
+{ "status": "ok" }
+```
 
-### `GET /api/file?path=...`
-- **Description:** Streams a file (supports HTTP Range requests).
-- **Query Parameters:**
-  - `path` (str, required): Path to the file.
-- **Response:** File stream
-- **Errors:** 404 if file not found.
+### `GET /api/bam/chromosomes?bam_path=<path>`
+Reads BAM header and returns contigs:
 
-### `HEAD /api/file?path=...`
-- **Description:** Returns headers for a file (for range/size checks).
-- **Query Parameters:**
-  - `path` (str, required): Path to the file.
-- **Response:** HTTP headers
-- **Errors:** 404 if file not found.
+```json
+{
+  "chromosomes": [
+    { "name": "chr20", "length": 63025520, "index": 0 }
+  ]
+}
+```
 
-### `GET /api/index?bam_path=...`
-- **Description:** Streams the BAM index (.bai) file.
-- **Query Parameters:**
-  - `bam_path` (str, required): Path to the BAM file.
-- **Response:** File stream
-- **Errors:** 404 if index not found.
+### `GET|HEAD /api/file?path=<path>`
+Streams arbitrary tracked files (supports HTTP range requests).
 
-### `HEAD /api/index?bam_path=...`
-- **Description:** Returns headers for the BAM index file.
-- **Query Parameters:**
-  - `bam_path` (str, required): Path to the BAM file.
-- **Response:** HTTP headers
-- **Errors:** 404 if index not found.
-
-### `POST /api/chat`
-- **Description:** Runs a chat-based analysis using the provided request.
-- **Request Body:** [`ChatRequest`](#chatrequest)
-- **Response:** [`ChatResponse`](#chatresponse)
-- **Errors:** 400 for contract or processing errors.
+### `GET|HEAD /api/index?bam_path=<path>`
+Streams BAM index (`.bai`) for a BAM file.
 
 ### `POST /api/region`
-- **Description:** Returns coverage and reads for a specified region in a BAM file.
-- **Request Body:** [`RegionRequest`](#regionrequest)
-- **Response:** `{ "coverage": [...], "reads": [...] }`
-- **Errors:** 400 for errors, only supports `mode=path`.
+Returns coverage + reads for a region (currently `mode=path` only).
+
+Request:
+
+```json
+{
+  "bam_path": "resource/test.bam",
+  "region": "20:59000-61000",
+  "mode": "path"
+}
+```
+
+Response:
+
+```json
+{
+  "coverage": [{ "pos": 59000, "depth": 12 }],
+  "reads": [{ "name": "r1", "start": 59000, "end": 59075 }]
+}
+```
 
 ---
 
-## Public Classes and Data Models
+## `POST /api/chat`
 
-### `ChatContract` ([app/services/chat_contracts.py](app/services/chat_contracts.py))
-- **Fields:**
-  - `message: str`
-  - `mode: Literal["path", "edge"]` (default: "path")
-  - `bam_path: str` (default: "")
-  - `region: Optional[str]` (default: None)
-  - `fasta_path: Optional[str]` (default: None)
-  - `edge_payload: Optional[EdgePayload]` (default: None)
+### Request model (`ChatRequest`)
+`ChatRequest` extends `ChatContract`.
 
-### `ChatRequest` ([app/main.py](app/main.py))
-- Inherits from `ChatContract`.
+```json
+{
+  "message": "switch to sv preset and analyze this region",
+  "mode": "path",
+  "bam_path": "resource/test.bam",
+  "fasta_path": "resource/chr20.fa",
+  "region": "20:59000-61000",
+  "edge_payload": null
+}
+```
 
-### `ChatResponse` ([app/main.py](app/main.py))
-- **Fields:**
-  - `response: str`
-  - `coverage: List[Dict[str, Any]]`
-  - `reads: List[Dict[str, Any]]`
-  - `region: Optional[str]`
-  - `variant_assessment: Dict[str, Any]`
-  - `metrics: Dict[str, Any]`
-  - `sv_present: Optional[bool]`
-  - `sv_type: Optional[str]`
-  - `sv_confidence: Optional[float]`
-  - `sv_evidence: List[Any]`
+### Response model (`ChatResponse`)
 
-### `RegionRequest` ([app/main.py](app/main.py))
-- **Fields:**
-  - `bam_path: str`
-  - `region: str`
-  - `mode: str` (default: "path")
+`/api/chat` now returns a typed, nested control payload (`control_resolution`) and additive compatibility fields (`igv_params`, `igv_feedback`, `preset`) derived from the same control payload when present.
 
-### `EdgePayload` ([app/services/chat_contracts.py](app/services/chat_contracts.py))
-- **Fields:**
-  - `coverage: List[Dict[str, Any]]`
-  - `reads: List[Dict[str, Any]]`
+```json
+{
+  "response": "Preset 'sv' applied with overrides: {'trackHeight': 180}",
+  "coverage": [],
+  "reads": [],
+  "region": "20:59000-61000",
+  "variant_assessment": {},
+  "metrics": {},
+  "sv_present": null,
+  "sv_type": null,
+  "sv_confidence": null,
+  "sv_evidence": [],
 
-### `NormalizedChatInput` ([app/services/chat_contracts.py](app/services/chat_contracts.py))
-- **Fields:**
-  - `message: str`
-  - `mode: Literal["path", "edge"]`
-  - `region: Optional[str]`
-  - `bam_path: str`
-  - `coverage: List[Dict[str, Any]]`
-  - `reads: List[Dict[str, Any]]`
+  "control_resolution": {
+    "preset": "sv",
+    "preset_source": "resource",
+    "preset_path": ".../resource/igv_presets/sv.json",
+    "base_igv": {
+      "trackHeight": 120,
+      "showCenterGuide": true,
+      "minMapQuality": 20
+    },
+    "resolved_igv": {
+      "trackHeight": 180,
+      "showCenterGuide": true,
+      "minMapQuality": 20
+    },
+    "applied": [
+      {
+        "key": "preset:sv",
+        "action": "applied",
+        "reason": "Loaded preset asset",
+        "value": ".../resource/igv_presets/sv.json"
+      },
+      {
+        "key": "trackHeight",
+        "action": "applied",
+        "reason": "Applied direct override",
+        "value": 180
+      }
+    ],
+    "skipped": [],
+    "failed": [],
+    "parse_notes": []
+  },
 
-### `ChatState` ([app/agents/state.py](app/agents/state.py))
-- **Fields:**
-  - `message: str`
-  - `mode: Literal["path", "edge"]`
-  - `bam_path: str`
-  - `region: str`
-  - `coverage: List[Dict[str, Any]]`
-  - `reads: List[Dict[str, Any]]`
-  - `response: str`
-  - `halt: bool`
-  - `intent: Literal["view_region", "analyze_coverage", "analyze_reads", "analyze_variant", "general_question", "unknown"]`
-  - `extracted_info: Dict[str, Any]`
-  - `variant_assessment: Dict[str, Any]`
+  "igv_params": {
+    "trackHeight": 180,
+    "showCenterGuide": true,
+    "minMapQuality": 20
+  },
+  "igv_feedback": "Preset 'sv' applied with overrides: {...}",
+  "preset": "sv",
 
----
+  "bam_tracks": [],
+  "per_track_results": {}
+}
+```
 
-## Public Methods and Functions
+### Typed control model details
 
-### BAM Service ([app/services/bam.py](app/services/bam.py))
-- `parse_region(region: str) -> Tuple[str, int, int]`: Parse a region string like `chr1:100-200`.
-- `ensure_bam_ready(bam_path: str) -> None`: Check BAM and index file existence.
-- `get_coverage(bam_path: str, region: str) -> List[Dict[str, Any]]`: Compute coverage for a region.
-- `get_reads(bam_path: str, region: str, max_reads: int = 200) -> List[Dict[str, Any]]`: Get reads for a region.
-- `summarize_coverage(coverage: List[Dict[str, Any]]) -> Dict[str, Any]`: Summarize coverage data.
+#### `control_resolution`
+- `preset: string | null` — requested preset name.
+- `preset_source: string` — one of current resolver sources (`resource`, `missing`, `invalid`, `none`).
+- `preset_path: string | null` — tracked preset asset path when loaded.
+- `base_igv: object` — baseline IGV params from preset asset.
+- `resolved_igv: object` — final deterministic params after overlays + overrides.
+- `applied: ControlResultItem[]`
+- `skipped: ControlResultItem[]`
+- `failed: ControlResultItem[]`
+- `parse_notes: string[]`
 
-### Chat Contracts ([app/services/chat_contracts.py](app/services/chat_contracts.py))
-- `normalize_chat_request(request: ChatContract) -> NormalizedChatInput`: Normalize a chat request.
+#### `ControlResultItem`
+- `key: string`
+- `action: "applied" | "skipped" | "failed"`
+- `reason: string`
+- `value?: any`
 
-### Agents ([app/agents/graph.py](app/agents/graph.py))
-- `intent_agent(state: ChatState) -> ChatState`: Classify user intent and extract region/bam_path.
-- `bam_agent(state: ChatState) -> ChatState`: Fetch reads and coverage from BAM.
-- `variant_agent(state: ChatState) -> ChatState`: Heuristic scoring for SVs (INS, DEL, DUP, INV, BND).
-- `response_agent(state: ChatState) -> ChatState`: Generate LLM answer with metrics and evidence.
-- `build_graph() -> Any`: Build the agent graph.
+### Failure semantics
 
----
+- Unknown preset requests are explicit in `control_resolution.failed` (e.g. `key = "preset:nope"`) and reflected in compatibility feedback (`"Preset 'nope' not recognized."`).
+- Invalid/malformed `control_resolution` objects from internal graph output fail API contract validation (HTTP 400) rather than silently drifting schema.
+- Compatibility fields are additive only:
+  - `igv_params` mirrors `control_resolution.resolved_igv`
+  - `preset` mirrors `control_resolution.preset`
+  - `igv_feedback` is preserved when provided, otherwise deterministically derived from typed control resolution
 
-All endpoints, classes, and methods above are verified as public and documented in the codebase. No undocumented features are included.
+### Redaction and boundary constraints
+
+- Only versioned preset names, allowed IGV keys, and tracked preset paths are serialized.
+- No secret values or arbitrary filesystem reads are surfaced by the contract.

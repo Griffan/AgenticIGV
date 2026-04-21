@@ -1,0 +1,9 @@
+{
+  "name": "sv",
+  "description": "Structural-variant visual baseline with taller tracks and center guide enabled.",
+  "igv": {
+    "trackHeight": 120,
+    "showCenterGuide": true,
+    "minMapQuality": 20
+  }
+}

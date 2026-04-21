@@ -81,6 +81,37 @@
       <section class="panel chat">
         <h2>Chat</h2>
         <div id="svSummary" class="sv-summary hidden">SV: not assessed</div>
+
+        <section id="controlSummary" class="control-summary hidden" data-testid="control-summary">
+          <header class="control-summary-header">
+            <h3>Control feedback</h3>
+            <span id="controlSummarySource" class="control-source" data-testid="control-source">No control payload</span>
+          </header>
+          <div class="control-grid">
+            <div class="control-column" data-testid="control-applied">
+              <h4>Applied</h4>
+              <ul id="controlAppliedList" class="control-list" data-testid="control-applied-list"></ul>
+            </div>
+            <div class="control-column" data-testid="control-skipped">
+              <h4>Skipped</h4>
+              <ul id="controlSkippedList" class="control-list" data-testid="control-skipped-list"></ul>
+            </div>
+            <div class="control-column" data-testid="control-failed">
+              <h4>Failed</h4>
+              <ul id="controlFailedList" class="control-list" data-testid="control-failed-list"></ul>
+            </div>
+          </div>
+          <div id="controlExecutionSummary" class="control-execution hidden" data-testid="control-execution-summary">
+            <h4>Browser application</h4>
+            <p id="controlExecutionHeadline" class="control-execution-headline" data-testid="control-execution-headline">No browser execution yet.</p>
+            <ul id="controlExecutionDetails" class="control-list" data-testid="control-execution-details"></ul>
+          </div>
+          <div class="control-notes" data-testid="control-parse-notes">
+            <h4>Parse notes</h4>
+            <ul id="controlParseNotes" class="control-list"></ul>
+          </div>
+        </section>
+
         <div id="messages" class="messages"></div>
         <div class="composer">
           <input id="messageInput" placeholder="Ask: 'Load chr20:60000-61000' or 'What's the coverage?' or 'Show mismatches'" />

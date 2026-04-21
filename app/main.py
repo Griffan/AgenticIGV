@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -72,10 +72,29 @@ class ChatRequest(ChatContract):
 
 
 
+class ControlResultItem(BaseModel):
+    key: str
+    action: Literal["applied", "skipped", "failed"]
+    reason: str
+    value: Optional[Any] = None
+
+
+class ControlResolutionPayload(BaseModel):
+    preset: Optional[str] = None
+    preset_source: str
+    preset_path: Optional[str] = None
+    base_igv: Dict[str, Any] = Field(default_factory=dict)
+    resolved_igv: Dict[str, Any] = Field(default_factory=dict)
+    applied: List[ControlResultItem] = Field(default_factory=list)
+    skipped: List[ControlResultItem] = Field(default_factory=list)
+    failed: List[ControlResultItem] = Field(default_factory=list)
+    parse_notes: List[str] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     response: str
-    coverage: List[dict]
-    reads: List[dict]
+    coverage: List[Dict[str, Any]]
+    reads: List[Dict[str, Any]]
     region: Optional[str] = None
     variant_assessment: Dict[str, Any] = Field(default_factory=dict)
     metrics: Dict[str, Any] = Field(default_factory=dict)
@@ -83,12 +102,44 @@ class ChatResponse(BaseModel):
     sv_type: Optional[str] = None
     sv_confidence: Optional[float] = None
     sv_evidence: List[str] = Field(default_factory=list)
-    igv_params: Optional[dict] = None
+    # Additive compatibility fields for existing UI consumers.
+    igv_params: Optional[Dict[str, Any]] = None
     igv_feedback: Optional[str] = None
     preset: Optional[str] = None
+    # Typed nested control payload for stable backend/frontend contract.
+    control_resolution: Optional[ControlResolutionPayload] = None
     bam_tracks: List[Dict[str, Any]] = Field(default_factory=list)
     per_track_results: Dict[str, Any] = Field(default_factory=dict)
 
+
+def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlResolutionPayload]:
+    if raw_control_resolution is None:
+        return None
+    if isinstance(raw_control_resolution, ControlResolutionPayload):
+        return raw_control_resolution
+    if isinstance(raw_control_resolution, dict):
+        return ControlResolutionPayload.model_validate(raw_control_resolution)
+    raise ValueError("control_resolution must be an object when present")
+
+
+def _derive_igv_feedback_from_control_resolution(control_resolution: ControlResolutionPayload) -> str:
+    if control_resolution.preset:
+        preset_key = f"preset:{control_resolution.preset}"
+        if any(item.key == preset_key and item.action == "failed" for item in control_resolution.failed):
+            return f"Preset '{control_resolution.preset}' not recognized."
+
+        has_direct_overrides = any(
+            item.action == "applied" and item.reason == "Applied direct override"
+            for item in control_resolution.applied
+        )
+        if has_direct_overrides:
+            return (
+                f"Preset '{control_resolution.preset}' applied with overrides: "
+                f"{control_resolution.resolved_igv}"
+            )
+        return f"Preset '{control_resolution.preset}' applied: {control_resolution.resolved_igv}"
+
+    return f"IGV parameters updated: {control_resolution.resolved_igv}"
 
 
 class RegionRequest(BaseModel):
@@ -248,7 +299,21 @@ def chat(request: ChatRequest) -> ChatResponse:
         result = _graph.invoke(payload)
         if DEBUG:
             print(f"[DEBUG] Agent pipeline result: {result}")
+
         variant_assessment = result.get("variant_assessment", {}) or {}
+        typed_control_resolution = _coerce_control_resolution(result.get("control_resolution"))
+
+        if typed_control_resolution is not None:
+            compatibility_igv_params = dict(typed_control_resolution.resolved_igv)
+            compatibility_preset = typed_control_resolution.preset
+            compatibility_igv_feedback = result.get("igv_feedback") or _derive_igv_feedback_from_control_resolution(
+                typed_control_resolution
+            )
+        else:
+            compatibility_igv_params = result.get("igv_params")
+            compatibility_preset = result.get("preset")
+            compatibility_igv_feedback = result.get("igv_feedback")
+
         return ChatResponse(
             response=result.get("response", ""),
             coverage=result.get("coverage", []),
@@ -260,9 +325,10 @@ def chat(request: ChatRequest) -> ChatResponse:
             sv_type=variant_assessment.get("sv_type"),
             sv_confidence=variant_assessment.get("confidence"),
             sv_evidence=variant_assessment.get("evidence", []),
-            igv_params=result.get("igv_params"),
-            igv_feedback=result.get("igv_feedback"),
-            preset=result.get("preset"),
+            igv_params=compatibility_igv_params,
+            igv_feedback=compatibility_igv_feedback,
+            preset=compatibility_preset,
+            control_resolution=typed_control_resolution,
             bam_tracks=result.get("bam_tracks", []),
             per_track_results=result.get("per_track_results", {}),
         )

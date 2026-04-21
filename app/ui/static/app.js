@@ -2,6 +2,15 @@ const messages = document.getElementById("messages");
 const messageInput = document.getElementById("messageInput");
 const sendMessage = document.getElementById("sendMessage");
 const svSummary = document.getElementById("svSummary");
+const controlSummary = document.getElementById("controlSummary");
+const controlSummarySource = document.getElementById("controlSummarySource");
+const controlAppliedList = document.getElementById("controlAppliedList");
+const controlSkippedList = document.getElementById("controlSkippedList");
+const controlFailedList = document.getElementById("controlFailedList");
+const controlParseNotes = document.getElementById("controlParseNotes");
+const controlExecutionSummary = document.getElementById("controlExecutionSummary");
+const controlExecutionHeadline = document.getElementById("controlExecutionHeadline");
+const controlExecutionDetails = document.getElementById("controlExecutionDetails");
 const bamPathInput = document.getElementById("bamPath");
 const fastaPathInput = document.getElementById("fastaPath");
 
@@ -407,6 +416,384 @@ function updateSvSummary(data) {
   svSummary.textContent = present
     ? `SV: present • type: ${svType}${confidence}`
     : `SV: no strong evidence${confidence}`;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeControlRows(rawRows, expectedAction) {
+  if (!Array.isArray(rawRows)) return [];
+
+  return rawRows
+    .filter((row) => isPlainObject(row) && row.action === expectedAction)
+    .map((row) => ({
+      key: typeof row.key === "string" ? row.key : "unknown",
+      reason: typeof row.reason === "string" ? row.reason : "No reason provided",
+      value: row.value,
+    }));
+}
+
+function formatControlValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch (_error) {
+    return "[unserializable value]";
+  }
+}
+
+const SUPPORTED_IGV_PARAM_KEYS = new Set([
+  "showCenterGuide",
+  "showNavigation",
+  "showRuler",
+  "trackHeight",
+  "viewAsPairs",
+  "showSoftClips",
+  "showReadNames",
+  "colorByStrand",
+  "minMapQuality",
+  "maxInsertSize",
+  "coverageThreshold",
+]);
+
+function createExecutionStatus(overrides = {}) {
+  return {
+    state: "not-run",
+    source: "none",
+    reloadNeeded: false,
+    appliedKeys: [],
+    ignoredKeys: [],
+    message: "No browser execution yet.",
+    error: null,
+    ...overrides,
+  };
+}
+
+function normalizeResolvedIgvParams(payload, controlResolution) {
+  const source = controlResolution?.source || "none";
+
+  if (source === "typed") {
+    const resolved = payload?.control_resolution?.resolved_igv;
+    if (!isPlainObject(resolved)) {
+      return { source, supported: {}, ignoredKeys: [] };
+    }
+
+    const supported = {};
+    const ignoredKeys = [];
+    for (const [key, value] of Object.entries(resolved)) {
+      if (SUPPORTED_IGV_PARAM_KEYS.has(key)) {
+        supported[key] = value;
+      } else {
+        ignoredKeys.push(key);
+      }
+    }
+    return { source, supported, ignoredKeys };
+  }
+
+  if (source === "legacy") {
+    const legacy = isPlainObject(payload?.igv_params) ? payload.igv_params : {};
+    const supported = {};
+    for (const [key, value] of Object.entries(legacy)) {
+      if (SUPPORTED_IGV_PARAM_KEYS.has(key)) {
+        supported[key] = value;
+      }
+    }
+    return { source, supported, ignoredKeys: [] };
+  }
+
+  return { source, supported: {}, ignoredKeys: [] };
+}
+
+async function runWithTimeout(workPromise, timeoutMs, timeoutMessage) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([workPromise, timeoutPromise]);
+  } finally {
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function executeTypedControlPayload(browser, payload, controlResolution, region) {
+  const normalized = normalizeResolvedIgvParams(payload, controlResolution);
+  const controlParams = normalized.supported;
+  const keys = Object.keys(controlParams);
+
+  if (!browser) {
+    return createExecutionStatus({
+      state: "browser-error",
+      source: normalized.source,
+      ignoredKeys: normalized.ignoredKeys,
+      error: "IGV browser is not initialized.",
+      message: "Browser application failed: IGV browser is not initialized.",
+    });
+  }
+
+  if (keys.length === 0) {
+    if (normalized.ignoredKeys.length > 0) {
+      return createExecutionStatus({
+        state: "no-supported-controls",
+        source: normalized.source,
+        ignoredKeys: normalized.ignoredKeys,
+        message: `Ignored unsupported control keys: ${normalized.ignoredKeys.join(", ")}.`,
+      });
+    }
+
+    return createExecutionStatus({
+      state: "no-controls",
+      source: normalized.source,
+      message: "No resolved IGV controls were provided for browser application.",
+    });
+  }
+
+  try {
+    const reloadNeeded = applyIgvParams(controlParams);
+    if (!reloadNeeded) {
+      return createExecutionStatus({
+        state: "applied-in-browser",
+        source: normalized.source,
+        appliedKeys: keys,
+        ignoredKeys: normalized.ignoredKeys,
+        message: "Applied in browser without reload.",
+      });
+    }
+
+    if (!region) {
+      return createExecutionStatus({
+        state: "browser-error",
+        source: normalized.source,
+        reloadNeeded: true,
+        appliedKeys: keys,
+        ignoredKeys: normalized.ignoredKeys,
+        error: "Reload-sensitive controls require a region.",
+        message: "Browser reload required but region was unavailable.",
+      });
+    }
+
+    await runWithTimeout(
+      browser.search(region),
+      5000,
+      "IGV reload timed out while applying controls.",
+    );
+    applyIgvParams(controlParams);
+
+    return createExecutionStatus({
+      state: "reloaded",
+      source: normalized.source,
+      reloadNeeded: true,
+      appliedKeys: keys,
+      ignoredKeys: normalized.ignoredKeys,
+      message: "Applied in browser after reload.",
+    });
+  } catch (error) {
+    const message = error?.message || "Unknown browser application failure.";
+    return createExecutionStatus({
+      state: "browser-error",
+      source: normalized.source,
+      reloadNeeded: false,
+      appliedKeys: keys,
+      ignoredKeys: normalized.ignoredKeys,
+      error: message,
+      message: `Browser application failed: ${message}`,
+    });
+  }
+}
+
+function deriveLegacyControlResolution(payload) {
+  const rows = [];
+  const parseNotes = [];
+
+  if (typeof payload?.preset === "string" && payload.preset.trim()) {
+    rows.push({
+      key: `preset:${payload.preset.trim()}`,
+      reason: "Compatibility preset field",
+      value: payload.preset.trim(),
+    });
+  }
+
+  if (isPlainObject(payload?.igv_params)) {
+    for (const [key, value] of Object.entries(payload.igv_params)) {
+      rows.push({
+        key,
+        reason: "Compatibility igv_params field",
+        value,
+      });
+    }
+  }
+
+  if (typeof payload?.igv_feedback === "string" && payload.igv_feedback.trim()) {
+    parseNotes.push(`Compatibility feedback: ${payload.igv_feedback.trim()}`);
+  }
+
+  if (rows.length === 0 && parseNotes.length === 0) {
+    return {
+      source: "none",
+      resolved_igv: {},
+      applied: [],
+      skipped: [],
+      failed: [],
+      parse_notes: [],
+    };
+  }
+
+  return {
+    source: "legacy",
+    resolved_igv: isPlainObject(payload?.igv_params) ? payload.igv_params : {},
+    applied: rows,
+    skipped: [],
+    failed: [],
+    parse_notes: parseNotes,
+  };
+}
+
+function normalizeControlResolution(payload) {
+  const hasTypedKey = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, "control_resolution");
+  const typed = hasTypedKey ? payload.control_resolution : undefined;
+
+  if (typed === undefined || typed === null) {
+    return deriveLegacyControlResolution(payload);
+  }
+
+  if (!isPlainObject(typed)) {
+    return {
+      source: "typed-malformed",
+      resolved_igv: {},
+      applied: [],
+      skipped: [],
+      failed: [],
+      parse_notes: ["Typed control payload is malformed and was ignored."],
+    };
+  }
+
+  const parseNotes = Array.isArray(typed.parse_notes)
+    ? typed.parse_notes.filter((note) => typeof note === "string")
+    : [];
+
+  return {
+    source: "typed",
+    resolved_igv: isPlainObject(typed.resolved_igv) ? typed.resolved_igv : {},
+    applied: normalizeControlRows(typed.applied, "applied"),
+    skipped: normalizeControlRows(typed.skipped, "skipped"),
+    failed: normalizeControlRows(typed.failed, "failed"),
+    parse_notes: parseNotes,
+  };
+}
+
+function setControlList(targetList, rows) {
+  if (!targetList) return;
+  targetList.innerHTML = "";
+  if (!Array.isArray(rows) || rows.length === 0) {
+    const emptyItem = document.createElement("li");
+    emptyItem.className = "control-empty";
+    emptyItem.textContent = "None";
+    targetList.appendChild(emptyItem);
+    return;
+  }
+
+  for (const row of rows) {
+    const item = document.createElement("li");
+    const renderedValue = formatControlValue(row.value);
+    item.textContent = renderedValue
+      ? `${row.key} — ${row.reason} (${renderedValue})`
+      : `${row.key} — ${row.reason}`;
+    targetList.appendChild(item);
+  }
+}
+
+function setControlNotes(targetList, notes) {
+  if (!targetList) return;
+  targetList.innerHTML = "";
+  if (!Array.isArray(notes) || notes.length === 0) {
+    const emptyItem = document.createElement("li");
+    emptyItem.className = "control-empty";
+    emptyItem.textContent = "None";
+    targetList.appendChild(emptyItem);
+    return;
+  }
+
+  for (const note of notes) {
+    const item = document.createElement("li");
+    item.textContent = note;
+    targetList.appendChild(item);
+  }
+}
+
+function renderControlSummary(payload) {
+  if (!controlSummary) return;
+
+  const normalized = normalizeControlResolution(payload);
+  const sourceLabel = normalized.source === "typed"
+    ? "Source: typed control_resolution"
+    : normalized.source === "legacy"
+    ? "Source: compatibility fallback"
+    : normalized.source === "typed-malformed"
+    ? "Source: typed payload malformed"
+    : "Source: no control payload";
+
+  if (controlSummarySource) {
+    controlSummarySource.textContent = sourceLabel;
+  }
+
+  setControlList(controlAppliedList, normalized.applied);
+  setControlList(controlSkippedList, normalized.skipped);
+  setControlList(controlFailedList, normalized.failed);
+  setControlNotes(controlParseNotes, normalized.parse_notes);
+
+  controlSummary.classList.remove("hidden");
+  return normalized;
+}
+
+function renderExecutionStatus(status = createExecutionStatus()) {
+  if (!controlExecutionSummary || !controlExecutionHeadline || !controlExecutionDetails) return;
+
+  controlExecutionDetails.innerHTML = "";
+
+  const summaryClass = ["control-execution"];
+  if (status.state === "browser-error") {
+    summaryClass.push("control-execution-error");
+  } else if (status.state === "reloaded") {
+    summaryClass.push("control-execution-reloaded");
+  } else if (status.state === "applied-in-browser") {
+    summaryClass.push("control-execution-applied");
+  }
+
+  controlExecutionSummary.className = summaryClass.join(" ");
+  controlExecutionSummary.classList.remove("hidden");
+  controlExecutionSummary.dataset.state = status.state;
+
+  controlExecutionHeadline.textContent = status.message;
+
+  const details = [
+    `State: ${status.state}`,
+    `Source: ${status.source}`,
+    `Reload needed: ${status.reloadNeeded ? "yes" : "no"}`,
+  ];
+
+  if (Array.isArray(status.appliedKeys) && status.appliedKeys.length > 0) {
+    details.push(`Applied keys: ${status.appliedKeys.join(", ")}`);
+  }
+
+  if (Array.isArray(status.ignoredKeys) && status.ignoredKeys.length > 0) {
+    details.push(`Ignored unsupported keys: ${status.ignoredKeys.join(", ")}`);
+  }
+
+  if (status.error) {
+    details.push(`Error: ${status.error}`);
+  }
+
+  for (const detail of details) {
+    const item = document.createElement("li");
+    item.textContent = detail;
+    controlExecutionDetails.appendChild(item);
+  }
 }
 
 async function fetchPathChromosomes(bamPath) {
@@ -1014,6 +1401,11 @@ async function fetchChat() {
   appendMessage(message, true);
   messageInput.value = "";
   updateSvSummary(null);
+  renderControlSummary({});
+  renderExecutionStatus(createExecutionStatus({
+    state: "not-run",
+    message: "Waiting for backend control response.",
+  }));
   const loadingMsg = appendMessage("Analyzing...", false);
 
   try {
@@ -1066,11 +1458,19 @@ async function fetchChat() {
     loadingMsg.remove();
 
     if (!response.ok) {
+      const failedControl = renderControlSummary(data || {});
+      renderExecutionStatus(createExecutionStatus({
+        state: "browser-error",
+        source: failedControl?.source || "none",
+        message: "Backend request failed before browser application.",
+        error: data?.detail || "Unknown error",
+      }));
       appendMessage(`Request failed: ${data.detail || "Unknown error"}`);
       return;
     }
 
     updateSvSummary(data);
+    const normalizedControl = renderControlSummary(data);
     appendMessage(data.response || "Done");
 
     // Show IGV feedback if present
@@ -1119,18 +1519,16 @@ async function fetchChat() {
       }
 
       const browser = await ensureBrowser(resolvedRegion, pathModeTracks);
+      const executionStatus = await executeTypedControlPayload(
+        browser,
+        data,
+        normalizedControl,
+        resolvedRegion,
+      );
+      renderExecutionStatus(executionStatus);
 
-      if (data.igv_params && typeof data.igv_params === "object") {
-        // Try in-memory re-pair first (works when data is already cached in viewports)
-        const needsReload = applyIgvParams(data.igv_params);
-        if (needsReload && resolvedRegion) {
-          // featureSource already updated; fresh search() will fetch with new setting
-          await browser.search(resolvedRegion);
-          // After data reloads, apply in-memory re-pair on the freshly loaded containers
-          applyIgvParams(data.igv_params);
-        }
-      } else if (resolvedRegion) {
-        await browser.search(resolvedRegion);
+      if (executionStatus.state === "browser-error") {
+        appendMessage(`Control execution warning: ${executionStatus.error || executionStatus.message}`);
       }
 
       let allTracks = getAllAlignmentTracks();
@@ -1180,9 +1578,20 @@ async function fetchChat() {
         appendMessage(`Warning: expected ${pathModeTracks.length} IGV track(s), but found ${allTracks.length}.`);
       }
 
+    } else {
+      renderExecutionStatus(createExecutionStatus({
+        state: "no-controls",
+        source: normalizedControl?.source || "none",
+        message: "Edge mode response received; no path-mode browser control application performed.",
+      }));
     }
   } catch (error) {
     loadingMsg.remove();
+    renderExecutionStatus(createExecutionStatus({
+      state: "browser-error",
+      message: "Request or browser execution failed.",
+      error: error?.message || "Failed to send message",
+    }));
     appendMessage(`Error: ${error.message || "Failed to send message"}`);
   }
 }

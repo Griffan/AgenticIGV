@@ -500,6 +500,94 @@ def test_chat_igv_presets(monkeypatch):
     assert data.get("igv_feedback") is not None
 
 
+def test_chat_control_resolution_preset_plus_override(monkeypatch):
+    """API: preset+override request returns control_resolution with applied/skipped/failed in serialized response."""
+    monkeypatch.setattr(graph_module, "USE_LLM", False)
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "use sv preset with trackHeight 180 and show navigation",
+            "mode": "path",
+            "bam_path": str(RESOURCE_BAM),
+            "region": "20:59000-61000",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    cr = data.get("control_resolution")
+    assert cr is not None, "Expected control_resolution in API response"
+    assert cr["preset"] == "sv"
+    assert cr["preset_source"] == "resource"
+    assert cr["resolved_igv"]["trackHeight"] == 180
+    assert cr["resolved_igv"]["showNavigation"] is True
+    # applied list must include preset and both overrides
+    applied_keys = [item["key"] for item in cr["applied"]]
+    assert "preset:sv" in applied_keys
+    assert "trackHeight" in applied_keys
+    assert "showNavigation" in applied_keys
+    assert cr["failed"] == []
+    # Compatibility fields derived from control_resolution
+    assert data["igv_params"]["trackHeight"] == 180
+    assert data["preset"] == "sv"
+
+
+def test_chat_control_resolution_partial_understanding(monkeypatch):
+    """API: partially understood input returns control_resolution with parse_notes and skipped items."""
+    monkeypatch.setattr(graph_module, "USE_LLM", False)
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "sv preset, maybe turn on ruler and track height",
+            "mode": "path",
+            "bam_path": str(RESOURCE_BAM),
+            "region": "20:59000-61000",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    cr = data.get("control_resolution")
+    assert cr is not None, "Expected control_resolution in API response"
+    assert cr["preset"] == "sv"
+    assert len(cr["parse_notes"]) > 0, "Partial understanding should surface parse_notes"
+    # Skipped items should include the parse_note entries
+    skipped_keys = [item["key"] for item in cr["skipped"]]
+    assert "parse_note" in skipped_keys, "parse_notes must appear as skipped items"
+    # Ruler override was understood
+    assert cr["resolved_igv"]["showRuler"] is True
+
+
+def test_chat_control_resolution_invalid_preset(monkeypatch):
+    """API: invalid preset name returns control_resolution with failed entry and error feedback."""
+    monkeypatch.setattr(graph_module, "USE_LLM", False)
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "switch to nope preset",
+            "mode": "path",
+            "bam_path": str(RESOURCE_BAM),
+            "region": "20:59000-61000",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    cr = data.get("control_resolution")
+    assert cr is not None, "Expected control_resolution in API response"
+    assert cr["preset"] == "nope"
+    assert cr["preset_source"] == "missing"
+    failed_keys = [item["key"] for item in cr["failed"]]
+    assert "preset:nope" in failed_keys, "Invalid preset must appear in failed list"
+    assert "not recognized" in data["igv_feedback"].lower()
+
+
 def test_chat_igv_ambiguous_no_silent_failure(monkeypatch):
     """Unsupported/ambiguous chat message does not silently fail; response is always non-empty."""
     import app.agents.graph as graph_module
