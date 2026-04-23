@@ -33,9 +33,32 @@ async function sendChatPrompt(page, prompt) {
 
   await expect(page.getByTestId('control-summary')).toBeVisible({ timeout: 45_000 });
   await expect(page.getByTestId('control-execution-summary')).toBeVisible({ timeout: 45_000 });
+  // Wait for the execution state machine to move past 'not-run' (backend responded)
+  // and then settle on a terminal state (applied-in-browser, reloaded, or browser-error).
+  // IGV.js initialisation is async after the response arrives so we poll until the
+  // state is no longer a transient value.
   await expect(page.getByTestId('control-execution-details')).not.toContainText('State: not-run', {
     timeout: 45_000,
   });
+  await expect(page.getByTestId('control-execution-details')).not.toContainText('State: not-run', {
+    timeout: 15_000,
+  });
+  // Additional settle wait: IGV createBrowser + applyIgvParams complete after search() resolves.
+  await page.waitForFunction(
+    () => {
+      const el = document.querySelector('[data-testid="control-execution-details"]');
+      if (!el) return false;
+      const text = el.textContent || '';
+      return (
+        text.includes('State: applied-in-browser') ||
+        text.includes('State: reloaded') ||
+        text.includes('State: browser-error') ||
+        text.includes('State: no-controls') ||
+        text.includes('State: no-supported-controls')
+      );
+    },
+    { timeout: 20_000 },
+  );
 }
 
 test.describe('live path-mode typed control proof', () => {

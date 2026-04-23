@@ -24,6 +24,9 @@ test.describe('typed control feedback', () => {
             viewAsPairs: false,
             showSoftClips: true,
             showReadNames: false,
+            // getFeatures must be present so waitForAllAlignmentTracksReady() considers
+            // this track ready without timing out.
+            getFeatures() { return Promise.resolve([]); },
           };
 
           const browser = {

@@ -1297,13 +1297,28 @@ function applyIgvParams(params) {
     } else if (key === "showNavigation") {
       igvBrowser.config.showNavigation = !!value;
       console.log("[applyIgvParams] showNavigation →", !!value);
-      const navEl = document.getElementById("igvNavigation") || (igvBrowser.navbar && igvBrowser.navbar.container);
+      // IGV.js exposes the navbar DOM node via igvBrowser.navbar or a child toolbar element.
+      // Walk multiple known attachment points so real and mocked instances both work.
+      const navEl =
+        (igvBrowser.navbar && igvBrowser.navbar.container) ||
+        (igvBrowser.navbar && igvBrowser.navbar.toolbar) ||
+        (igvBrowser.toolbar && igvBrowser.toolbar.container) ||
+        (typeof igvBrowser.getNavbarEl === "function" ? igvBrowser.getNavbarEl() : null);
       if (navEl) navEl.style.display = !!value ? "" : "none";
 
     } else if (key === "showRuler") {
       igvBrowser.config.showRuler = !!value;
       console.log("[applyIgvParams] showRuler →", !!value);
+      // IGV.js ruler lives on the sequence/ruler track view, not on individual alignment viewports.
+      // The rulerSweeper path is kept as a fallback; the primary path is the ruler track container.
       igvBrowser.trackViews.forEach(rtv => {
+        // Primary: ruler track exposes its own container
+        if (rtv.track && (rtv.track.type === "ruler" || rtv.track.type === "sequence")) {
+          if (rtv.container) {
+            rtv.container.style.display = !!value ? "" : "none";
+          }
+        }
+        // Fallback: rulerSweeper on alignment viewports (IGV < 2.14 shape)
         (rtv.viewports || []).forEach(vp => {
           if (vp.rulerSweeper && vp.rulerSweeper.container) {
             vp.rulerSweeper.container.style.display = !!value ? "" : "none";
@@ -1336,7 +1351,6 @@ function applyIgvParams(params) {
           }
           // Try in-memory re-pair first (works when data is already loaded)
           const containers = (tv.viewports || []).map(vp => vp.cachedFeatures);
-          console.log("[applyIgvParams] containers:", containers);
           let repairedInMemory = false;
           containers.forEach(container => {
             if (container && typeof container.setViewAsPairs === "function") {
@@ -1366,13 +1380,26 @@ function applyIgvParams(params) {
           if (typeof tv.repaintViews === "function") tv.repaintViews();
 
         } else if (key === "colorByStrand") {
-          track.colorBy = value ? "strand" : "none";
-          track.config.colorBy = value ? "strand" : "none";
+          // IGV.js alignment tracks use track.colorBy as a string property ("strand" | "none" | etc.)
+          // and also honor track.config.colorBy. Both must be set; repaint picks up the config value.
+          const colorByValue = value ? "strand" : "none";
+          track.colorBy = colorByValue;
+          track.config.colorBy = colorByValue;
+          // Also set the paired alternative field some IGV versions expose.
+          if ("colorByStrand" in track) track.colorByStrand = !!value;
+          if ("colorByStrand" in track.config) track.config.colorByStrand = !!value;
           if (typeof tv.repaintViews === "function") tv.repaintViews();
 
         } else if (key === "minMapQuality") {
+          // minMapQuality filters reads at the feature-source level; repaint alone is not sufficient.
+          // Setting track.filterFunction is the IGV.js-idiomatic approach when featureSource exposes it.
           track.config.minMapQuality = Number(value);
-          if (typeof tv.repaintViews === "function") tv.repaintViews();
+          if (track.featureSource && typeof track.featureSource.setMinMapQuality === "function") {
+            track.featureSource.setMinMapQuality(Number(value));
+          }
+          // Reload is required so the new threshold is applied during feature fetch.
+          console.log("[applyIgvParams] minMapQuality →", Number(value));
+          dataReloadNeeded = true;
 
         } else if (key === "maxInsertSize") {
           track.config.maxInsertSize = Number(value);
@@ -1473,16 +1500,6 @@ async function fetchChat() {
     const normalizedControl = renderControlSummary(data);
     appendMessage(data.response || "Done");
 
-    // Show IGV feedback if present
-    if (data.igv_feedback) {
-      appendMessage(`<span class='igv-feedback'>${data.igv_feedback}</span>`);
-    }
-
-    // Optionally show preset info
-    if (data.preset) {
-      appendMessage(`<span class='igv-preset'>Preset: <b>${data.preset}</b></span>`);
-    }
-
     const resolvedRegion = (data.region || region || igvRegion || "").trim();
     if (resolvedRegion) {
       regionInput.value = resolvedRegion;
@@ -1531,9 +1548,20 @@ async function fetchChat() {
         appendMessage(`Control execution warning: ${executionStatus.error || executionStatus.message}`);
       }
 
-      let allTracks = getAllAlignmentTracks();
+      // Wait for IGV to finish mounting tracks before counting them.
+      // ensureBrowser() resolves as soon as igv.createBrowser() returns, but track
+      // views are populated asynchronously — reading getAllAlignmentTracks() immediately
+      // may see zero tracks and trigger spurious fallback loads.
+      let allTracks = [];
+      try {
+        const readyTracks = await waitForAllAlignmentTracksReady(4000);
+        allTracks = readyTracks;
+      } catch (_readyErr) {
+        // Timed out waiting — fall through to the explicit count check below.
+        allTracks = getAllAlignmentTracks();
+      }
 
-      // Fallback: if IGV created fewer tracks than expected, load missing tracks explicitly.
+      // Fallback: if IGV still has fewer tracks than expected, load missing tracks explicitly.
       if (allTracks.length < pathModeTracks.length && typeof browser.loadTrack === "function") {
         const perTrackHeight = pathModeTracks.length > 1
           ? Math.max(200, Math.floor(700 / pathModeTracks.length))
