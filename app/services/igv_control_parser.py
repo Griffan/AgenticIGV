@@ -66,9 +66,6 @@ for _key, _aliases in NUMERIC_PLAIN_ALIASES.items():
     for _alias in _aliases:
         _OPTION_CANDIDATES[_alias] = _key
 
-FUZZY_MATCH_THRESHOLD: float = 70.0
-
-
 @dataclass(frozen=True)
 class ParsedControlRequest:
     preset: Optional[str]
