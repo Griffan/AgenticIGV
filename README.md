@@ -77,9 +77,10 @@ Open http://localhost:8000 in your browser.
   - "What's the average mapping quality?"
   - "Are reads evenly distributed across strands?"
 
-**Quick test with sample BAM:**
+**Quick test with tracked sample BAM:**
 ```
-BAM: resource/test/test.bam
+BAM: resource/test.bam
+FASTA: resource/chr20.fa
 Region: 20:59000-61000
 Chat: "Analyze the coverage in this region"
 ```

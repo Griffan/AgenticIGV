@@ -1,0 +1,9 @@
+{
+  "name": "cnv",
+  "description": "Copy-number variant baseline with compact tracks and coverage threshold emphasis.",
+  "igv": {
+    "trackHeight": 70,
+    "showRuler": true,
+    "coverageThreshold": 20
+  }
+}

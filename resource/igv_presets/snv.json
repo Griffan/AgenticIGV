@@ -1,0 +1,9 @@
+{
+  "name": "snv",
+  "description": "Single-nucleotide variant baseline emphasizing read names and strand coloring.",
+  "igv": {
+    "trackHeight": 80,
+    "showReadNames": true,
+    "colorByStrand": true
+  }
+}

@@ -9,6 +9,8 @@ from langgraph.graph import END, StateGraph
 
 from app.agents.state import ChatState
 from app.services.bam import get_coverage, get_reads, summarize_coverage
+from app.services.igv_control import resolve_control_contract
+from app.services.igv_control_parser import parse_control_request
 from app.llm import get_llm_model
 
 
@@ -25,6 +27,10 @@ BAM_PATH_FINDER = re.compile(r"([~\w./-]+\.bam)\b", re.IGNORECASE)
 USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
 VARIANT_KEYWORDS = re.compile(
     r"\b(sv|structural variant|variant|deletion|insertion|duplication|inversion|translocation|breakpoint|fusion)\b",
+    re.IGNORECASE,
+)
+ANALYSIS_INTENT_HINTS = re.compile(
+    r"\b(analy[sz]e|analysis|coverage|depth|pileup|signal|evidence|inspect)\b",
     re.IGNORECASE,
 )
 DECOY_CONTIG_HINTS = ("hs37d5", "decoy", "random", "chrUn", "_alt", "_fix", "GL", "KI")
@@ -89,6 +95,24 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _infer_analysis_intent(message: str) -> Optional[str]:
+    text = message or ""
+    has_explicit_analysis = bool(ANALYSIS_INTENT_HINTS.search(text))
+    has_preset_phrase = bool(re.search(r"\b[a-z][\w-]*\s+preset\b", text, re.IGNORECASE))
+
+    # Avoid treating plain "sv preset" control-only requests as variant-analysis asks.
+    if has_preset_phrase and not has_explicit_analysis and not re.search(r"\b(coverage|depth)\b", text, re.IGNORECASE):
+        return None
+
+    if VARIANT_KEYWORDS.search(text):
+        return "analyze_variant"
+    if re.search(r"\b(coverage|depth)\b", text, re.IGNORECASE):
+        return "analyze_coverage"
+    if has_explicit_analysis:
+        return "view_region"
+    return None
+
+
 def intent_agent(state: ChatState) -> ChatState:
     """Understand user intent, extract region, IGV parameters, and preset requests via LLM or pattern matching."""
     message = state.get("message", "")
@@ -117,90 +141,42 @@ def intent_agent(state: ChatState) -> ChatState:
         state["bam_path"] = ""
 
     # --- IGV.js parameter extraction and preset support ---
-    # Supported IGV.js parameters and their natural-language aliases
-    IGV_PARAM_ALIASES = {
-        "trackHeight": [r"track\s*height"],
-        "showCenterGuide": [r"show\s*center\s*guide", r"center\s*guide"],
-        "showNavigation": [r"show\s*navigation", r"navigation"],
-        "showRuler": [r"show\s*ruler", r"ruler"],
-        "showReadNames": [r"show\s*read\s*names", r"read\s*names"],
-        "colorByStrand": [r"color\s*by\s*strand", r"colour\s*by\s*strand"],
-        "minMapQuality": [r"min(?:imum)?\s*map(?:ping)?\s*quality", r"min\s*mapq", r"mapq"],
-        "maxInsertSize": [r"max(?:imum)?\s*insert\s*size"],
-        "coverageThreshold": [r"coverage\s*threshold"],
-        "viewAsPairs": [r"view\s*as\s*pairs", r"pair(?:ed)?\s*view", r"show\s*pairs", r"pairs?\s*mode"],
-    }
-    IGV_PARAMS = list(IGV_PARAM_ALIASES.keys())
-    BUILTIN_PRESETS = {
-        "default": {},
-        "sv": {"trackHeight": 120, "showCenterGuide": True, "minMapQuality": 20},
-        "coverage": {"trackHeight": 80, "showCenterGuide": False, "showRuler": True},
-        "reads": {"showReadNames": True, "colorByStrand": True},
-    }
-    # Extract preset request (simple pattern)
-    preset = None
-    for key in BUILTIN_PRESETS:
-        if key in message.lower():
-            preset = key
-            break
-    # Extract IGV.js parameter changes — camelCase syntax OR natural language aliases
-    param_changes = {}
+    parsed_control = parse_control_request(message, state_preset=state.get("preset"))
 
-    def _parse_value(raw: str):
-        if raw.lower() in ("true", "on", "yes", "enable", "enabled"):
-            return True
-        if raw.lower() in ("false", "off", "no", "disable", "disabled"):
-            return False
-        try:
-            return int(raw)
-        except Exception:
-            return raw
+    # Pattern parsing takes priority for control extraction, but mixed control+analysis
+    # requests should continue to the BAM/variant branch.
+    if parsed_control.has_control_request:
+        resolution = resolve_control_contract(
+            preset=parsed_control.preset,
+            direct_overrides=parsed_control.overrides,
+            user_presets=state.get("user_presets", {}),
+            parse_notes=parsed_control.parse_notes,
+        )
+        state["control_resolution"] = resolution
+        state["control_parse_notes"] = parsed_control.parse_notes
+        state["preset"] = parsed_control.preset
+        state["igv_params"] = resolution["resolved_igv"]
 
-    for param, aliases in IGV_PARAM_ALIASES.items():
-        # 1. Try exact camelCase: trackHeight: 120 / trackHeight=120
-        exact = re.compile(rf"{param}\s*[:=]\s*(\w+)", re.IGNORECASE)
-        m = exact.search(message)
-        if m:
-            param_changes[param] = _parse_value(m.group(1))
-            continue
-        # 2. Try natural-language aliases with optional value
-        for alias in aliases:
-            # "set/enable/disable/turn on/turn off <alias>" or "<alias>: value"
-            nl_pat = re.compile(
-                rf"(?:set|enable|disable|turn\s+on|turn\s+off|show|hide|use)?\s*{alias}"
-                rf"(?:\s*[:=]\s*(\w+))?",
-                re.IGNORECASE,
-            )
-            m = nl_pat.search(message)
-            if m:
-                if m.group(1):
-                    param_changes[param] = _parse_value(m.group(1))
-                else:
-                    # Infer boolean from verb
-                    snippet = m.group(0).lower()
-                    if re.search(r"\b(disable|turn\s+off|hide|off|no)\b", snippet):
-                        param_changes[param] = False
-                    else:
-                        param_changes[param] = True
-                break
+        preset_failed = any(item.get("key") == f"preset:{parsed_control.preset}" for item in resolution["failed"])
+        if parsed_control.preset and preset_failed:
+            state["igv_feedback"] = f"Preset '{parsed_control.preset}' not recognized."
+        elif parsed_control.preset and parsed_control.overrides:
+            state["igv_feedback"] = f"Preset '{parsed_control.preset}' applied with overrides: {resolution['resolved_igv']}"
+        elif parsed_control.preset:
+            state["igv_feedback"] = f"Preset '{parsed_control.preset}' applied: {resolution['resolved_igv']}"
+        else:
+            state["igv_feedback"] = f"IGV parameters updated: {resolution['resolved_igv']}"
 
-    # User-defined preset support (from state)
-    user_presets = state.get("user_presets", {})
-    if "preset" in state:
-        preset = state["preset"]
-    if preset and preset in user_presets:
-        param_changes.update(user_presets[preset])
-    elif preset and preset in BUILTIN_PRESETS:
-        param_changes.update(BUILTIN_PRESETS[preset])
-    if param_changes:
-        state["igv_params"] = param_changes
-        state["igv_feedback"] = f"IGV parameters updated: {param_changes}"
-    elif preset:
-        state["igv_feedback"] = f"Preset '{preset}' recognized, but no parameters found."
+        inferred_analysis_intent = _infer_analysis_intent(message)
+        if inferred_analysis_intent:
+            state["intent"] = inferred_analysis_intent
+            state["route_selection"] = "analysis"
+            if region:
+                state["region"] = region
+            return state
 
-    # --- Pattern matching takes priority: if IGV params/preset were resolved, skip LLM ---
-    if param_changes or preset:
         state["intent"] = "adjust_igv"
+        state["route_selection"] = "control"
         if region:
             state["region"] = region
         if not state.get("response"):
@@ -220,6 +196,7 @@ def intent_agent(state: ChatState) -> ChatState:
             state["intent"] = "analyze_variant"
         else:
             state["intent"] = "view_region"
+        state["route_selection"] = "analysis"
         return state
     # Use LLM to understand intent
     llm = get_llm_model()
@@ -255,29 +232,37 @@ Respond in JSON format:
         import json
         result = json.loads(_content_to_text(response.content))
         state["intent"] = result.get("intent", "unknown")
+        state["route_selection"] = "control" if state.get("intent") == "adjust_igv" else "analysis"
         extracted_region = result.get("region")
         if extracted_region:
             state["region"] = extracted_region
         elif region:
             state["region"] = region
         # IGV.js parameter and preset extraction from LLM
-        llm_params = result.get("igv_params")
-        if isinstance(llm_params, dict) and llm_params:
-            state["igv_params"] = llm_params
-            state["igv_feedback"] = f"IGV parameters updated: {llm_params}"
+        llm_params = result.get("igv_params") if isinstance(result.get("igv_params"), dict) else {}
         llm_preset = result.get("preset")
-        if llm_preset:
+
+        if llm_preset or llm_params:
             state["preset"] = llm_preset
-            # Apply preset if known
-            if llm_preset in user_presets:
-                state["igv_params"] = user_presets[llm_preset]
-                state["igv_feedback"] = f"User preset '{llm_preset}' applied: {user_presets[llm_preset]}"
-            elif llm_preset in BUILTIN_PRESETS:
-                state["igv_params"] = BUILTIN_PRESETS[llm_preset]
-                state["igv_feedback"] = f"Preset '{llm_preset}' applied: {BUILTIN_PRESETS[llm_preset]}"
-            else:
+            resolution = resolve_control_contract(
+                preset=llm_preset,
+                direct_overrides=llm_params,
+                user_presets=state.get("user_presets", {}),
+                parse_notes=[],
+            )
+            state["control_resolution"] = resolution
+            state["control_parse_notes"] = []
+            state["igv_params"] = resolution["resolved_igv"]
+
+            preset_failed = any(item.get("key") == f"preset:{llm_preset}" for item in resolution["failed"])
+            if llm_preset and preset_failed:
                 state["igv_feedback"] = f"Preset '{llm_preset}' not recognized."
-        state["extracted_info"] = result
+            elif llm_preset and llm_params:
+                state["igv_feedback"] = f"Preset '{llm_preset}' applied with overrides: {resolution['resolved_igv']}"
+            elif llm_preset:
+                state["igv_feedback"] = f"Preset '{llm_preset}' applied: {resolution['resolved_igv']}"
+            else:
+                state["igv_feedback"] = f"IGV parameters updated: {resolution['resolved_igv']}"
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] intent_agent: LLM exception: {e}")
@@ -288,8 +273,10 @@ Respond in JSON format:
                 state["intent"] = "analyze_variant"
             else:
                 state["intent"] = "view_region"
+            state["route_selection"] = "analysis"
         else:
             state["intent"] = "unknown"
+            state["route_selection"] = "analysis"
     return state
 
 
@@ -297,6 +284,7 @@ def bam_agent(state: ChatState) -> ChatState:
     """Fetch BAM data for all tracks independently with per-track error isolation"""
     if state.get("halt"):
         return state
+    state["route_selection"] = "analysis"
     mode = state.get("mode", "path")
     if mode == "edge":
         # Edge mode ships pre-parsed reads/coverage from browser-side parsing.
@@ -936,14 +924,39 @@ Provide a helpful response to the user's question. When multiple samples are ana
     return state
 
 
+def control_response_agent(state: ChatState) -> ChatState:
+    """Finalize pure IGV control requests without invoking BAM/variant analysis."""
+    if state.get("halt"):
+        return state
+    state["route_selection"] = "control"
+    if not state.get("response"):
+        state["response"] = state.get("igv_feedback", "IGV settings updated.")
+    return state
+
+
+def _route_after_intent(state: ChatState) -> str:
+    if state.get("intent") == "adjust_igv" and not state.get("halt"):
+        return "control_response_agent"
+    return "bam_agent"
+
+
 def build_graph() -> Any:
     graph = StateGraph(ChatState)
     graph.add_node("intent_agent", intent_agent)
+    graph.add_node("control_response_agent", control_response_agent)
     graph.add_node("bam_agent", bam_agent)
     graph.add_node("variant_agent", variant_agent)
     graph.add_node("response_agent", response_agent)
     graph.set_entry_point("intent_agent")
-    graph.add_edge("intent_agent", "bam_agent")
+    graph.add_conditional_edges(
+        "intent_agent",
+        _route_after_intent,
+        {
+            "control_response_agent": "control_response_agent",
+            "bam_agent": "bam_agent",
+        },
+    )
+    graph.add_edge("control_response_agent", END)
     graph.add_edge("bam_agent", "variant_agent")
     graph.add_edge("variant_agent", "response_agent")
     graph.add_edge("response_agent", END)

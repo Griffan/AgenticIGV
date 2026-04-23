@@ -33,5 +33,7 @@ vendor/
 coverage/
 .cache/
 tmp/
-.claude/
-.agents/
+test-results/
+
+# ── GSD baseline (auto-generated) ──
+.mcp.json
