@@ -24,7 +24,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 REGION_FINDER = re.compile(r"([\w.-]+:\d+[-\.]{1,2}\d+)")
 CONTIG_FINDER = re.compile(r"\b(chr\w+|\d+)\b", re.IGNORECASE)
 BAM_PATH_FINDER = re.compile(r"([~\w./-]+\.bam)\b", re.IGNORECASE)
-USE_LLM = bool(os.getenv("OPENAI_API_KEY"))
+USE_LLM = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AWS_ACCESS_KEY_ID"))
 VARIANT_KEYWORDS = re.compile(
     r"\b(sv|structural variant|variant|deletion|insertion|duplication|inversion|translocation|breakpoint|fusion)\b",
     re.IGNORECASE,

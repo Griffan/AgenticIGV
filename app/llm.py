@@ -97,6 +97,7 @@ def _create_bedrock_model() -> BaseChatModel:
             "temperature": temperature,
             "max_tokens": max_tokens,
         },
+        "aws_session_token": os.getenv("AWS_ACCESS_KEY_ID"),
     }
     
     return ChatBedrock(**kwargs)
