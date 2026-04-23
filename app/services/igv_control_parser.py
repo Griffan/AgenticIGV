@@ -10,9 +10,12 @@ from dataclasses import dataclass
 import re
 from typing import Any, Dict, Optional
 
+from rapidfuzz import process as _rf_process
 
 BOOLEAN_TRUE_TOKENS = {"true", "on", "yes", "enable", "enabled"}
 BOOLEAN_FALSE_TOKENS = {"false", "off", "no", "disable", "disabled"}
+
+FUZZY_MATCH_THRESHOLD: float = 70.0
 
 NUMERIC_ALIASES: dict[str, list[str]] = {
     "trackHeight": [r"track\s*height", r"trackheight"],
@@ -30,6 +33,34 @@ BOOLEAN_ALIASES: dict[str, list[str]] = {
     "viewAsPairs": [r"view\s*as\s*pairs", r"pair(?:ed)?\s*view", r"show\s*pairs", r"pairs?\s*mode"],
 }
 
+# Plain-string aliases for fuzzy matching (no regex metacharacters)
+BOOLEAN_PLAIN_ALIASES: dict[str, list[str]] = {
+    "viewAsPairs": ["view as pairs", "viewAsPairs", "view pair", "paired view", "show pairs", "pairs mode", "view pairs", "place alignments in pair"],
+    "showReadNames": ["show read names", "showReadNames", "read names"],
+    "showCenterGuide": ["show center guide", "showCenterGuide", "center guide"],
+    "showNavigation": ["show navigation", "showNavigation", "navigation"],
+    "showRuler": ["show ruler", "showRuler", "ruler"],
+    "colorByStrand": ["color by strand", "colorByStrand", "colour by strand"],
+}
+
+NUMERIC_PLAIN_ALIASES: dict[str, list[str]] = {
+    "trackHeight": ["track height", "trackHeight", "track ht"],
+    "minMapQuality": ["min map quality", "minMapQuality", "min quality", "min mapq", "mapq", "minimum mapping quality"],
+    "maxInsertSize": ["max insert size", "maxInsertSize", "maximum insert size"],
+    "coverageThreshold": ["coverage threshold", "coverageThreshold"],
+}
+
+# Flat candidate pool: candidate_string -> canonical_key
+_OPTION_CANDIDATES: dict[str, str] = {}
+for _key, _aliases in BOOLEAN_PLAIN_ALIASES.items():
+    _OPTION_CANDIDATES[_key] = _key
+    for _alias in _aliases:
+        _OPTION_CANDIDATES[_alias] = _key
+for _key, _aliases in NUMERIC_PLAIN_ALIASES.items():
+    _OPTION_CANDIDATES[_key] = _key
+    for _alias in _aliases:
+        _OPTION_CANDIDATES[_alias] = _key
+
 
 @dataclass(frozen=True)
 class ParsedControlRequest:
@@ -46,6 +77,18 @@ def _parse_bool_token(value: str) -> Optional[bool]:
     if lowered in BOOLEAN_FALSE_TOKENS:
         return False
     return None
+
+
+def _normalize_option_key(token: str, parse_notes: list[str]) -> Optional[str]:
+    """Return the canonical IGV key for *token*, or None if below threshold."""
+    result = _rf_process.extractOne(token, _OPTION_CANDIDATES.keys(), score_cutoff=FUZZY_MATCH_THRESHOLD)
+    if result is None:
+        parse_notes.append(
+            f"Unrecognized option name '{token}' — no match above threshold {FUZZY_MATCH_THRESHOLD}"
+        )
+        return None
+    best_candidate, _score, _idx = result
+    return _OPTION_CANDIDATES[best_candidate]
 
 
 def _extract_preset(text: str) -> Optional[str]:
@@ -76,10 +119,27 @@ def _extract_numeric_overrides(text: str, parse_notes: list[str]) -> Dict[str, i
         if key in overrides:
             continue
 
+    # Fuzzy fallback for unmatched numeric-adjacent tokens
+    _BOOL_PATTERN = r"(?:true|false|on|off|yes|no|enabled|disabled)"
+    for m in re.finditer(r"(\S+(?:\s+\S+)?)\s*[:=\s]\s*(-?\d+)\b", text, re.IGNORECASE):
+        left, value = m.group(1).strip(), m.group(2)
+        # Skip if left side is a boolean value token or already matched
+        if left.lower() in BOOLEAN_TRUE_TOKENS | BOOLEAN_FALSE_TOKENS:
+            continue
+        # Skip filler words
+        if left.lower() in {"set", "to", "the", "a", "an"}:
+            continue
+        already_matched = any(left.lower() == k.lower() for k in overrides)
+        if already_matched:
+            continue
+        canonical = _normalize_option_key(left, parse_notes)
+        if canonical and canonical not in overrides:
+            overrides[canonical] = int(value)
+
     return overrides
 
 
-def _extract_boolean_overrides(text: str) -> Dict[str, bool]:
+def _extract_boolean_overrides(text: str, parse_notes: list[str]) -> Dict[str, bool]:
     overrides: Dict[str, bool] = {}
 
     for key, aliases in BOOLEAN_ALIASES.items():
@@ -102,6 +162,24 @@ def _extract_boolean_overrides(text: str) -> Dict[str, bool]:
                 overrides[key] = True
             break
 
+    # Fuzzy fallback for unmatched boolean-adjacent tokens
+    _BOOL_VAL_RE = r"(true|false|on|off|yes|no|enabled|disabled)"
+    for m in re.finditer(rf"(\S+(?:\s+\S+)?)\s+{_BOOL_VAL_RE}\b", text, re.IGNORECASE):
+        left, bool_str = m.group(1).strip(), m.group(2)
+        # Skip filler words
+        if left.lower() in {"set", "to", "the", "a", "an", "please"}:
+            continue
+        # Skip if left side already matched a canonical key
+        already_matched = any(left.lower() == k.lower() for k in overrides)
+        if already_matched:
+            continue
+        parsed = _parse_bool_token(bool_str)
+        if parsed is None:
+            continue
+        canonical = _normalize_option_key(left, parse_notes)
+        if canonical and canonical not in overrides:
+            overrides[canonical] = parsed
+
     return overrides
 
 
@@ -113,7 +191,7 @@ def parse_control_request(message: str, state_preset: Optional[str] = None) -> P
     preset = (state_preset or parsed_preset)
 
     numeric = _extract_numeric_overrides(text, parse_notes)
-    boolean = _extract_boolean_overrides(text)
+    boolean = _extract_boolean_overrides(text, parse_notes)
     overrides: Dict[str, Any] = {**boolean, **numeric}
 
     has_control_request = bool(parsed_preset or state_preset or overrides or parse_notes)
