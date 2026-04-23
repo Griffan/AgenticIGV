@@ -134,7 +134,7 @@ def load_preset_asset(name: str) -> tuple[PresetAsset, Path]:
 def _validate_override_value(key: str, value: Any, failures: List[ControlResult]) -> Optional[Any]:
     if key in {"trackHeight", "minMapQuality", "maxInsertSize", "coverageThreshold"}:
         return _ensure_int(value, key, failures)
-    if key in {"showCenterGuide", "showNavigation", "showRuler", "showReadNames", "colorByStrand", "viewAsPairs"}:
+    if key in {"showCenterGuide", "showNavigation", "showRuler", "showReadNames", "colorByStrand", "viewAsPairs", "showSoftClips"}:
         return _ensure_bool(value, key, failures)
     failures.append({"key": key, "action": "failed", "reason": f"Unsupported override key {key}", "value": value})
     return None
