@@ -77,6 +77,7 @@ BOOLEAN_ALIASES: dict[str, list[str]] = {
     "showReadNames": [r"show\s*read\s*names", r"read\s*names"],
     "colorByStrand": [r"color\s*by\s*strand", r"colour\s*by\s*strand"],
     "viewAsPairs": [r"view\s*as\s*pairs", r"pair(?:ed)?\s*view", r"show\s*pairs", r"pairs?\s*mode"],
+    "showSoftClips": [r"show\s*soft\s*clips", r"soft\s*clips"],
 }
 
 # Plain-string alias candidates used for fuzzy matching (no regex metacharacters).
@@ -263,7 +264,7 @@ def parse_control_request(message: str, state_preset: Optional[str] = None) -> P
     parse_notes: list[str] = []
 
     parsed_preset = _extract_preset(text)
-    preset = (state_preset or parsed_preset)
+    preset = (parsed_preset or state_preset)
 
     numeric = _extract_numeric_overrides(text, parse_notes)
     boolean = _extract_boolean_overrides(text, parse_notes)
