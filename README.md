@@ -85,32 +85,6 @@ Region: 20:59000-61000
 Chat: "Analyze the coverage in this region"
 ```
 
-## Live browser proof (S03)
-
-Run the end-to-end typed-control proof against the real FastAPI app in path mode with the checked-in script:
-
-```bash
-npm run test:e2e:live
-```
-
-Equivalent direct Playwright invocation:
-
-```bash
-OPENAI_API_KEY=dummy node_modules/.bin/playwright test tests/e2e/igv_control_live.spec.js
-```
-
-If you are targeting a single spec file, prefer the checked-in npm scripts or `node_modules/.bin/playwright ...`; `npm exec playwright test <spec>` can drop the positional spec argument under some npm versions.
-
-What this live spec verifies:
-- preset + override request applies in-browser and surfaces typed `control_resolution` rows
-- partial-understanding request preserves parse-note/skipped feedback
-- mixed control + analysis request still applies control while keeping visible SV analysis output
-
-Troubleshooting browser dependencies on fresh Linux machines:
-- install browser binaries: `npx playwright install --with-deps chromium`
-- if Playwright reports missing shared libraries (for example `libnspr4.so`), run `npx playwright install-deps chromium`
-- keep Playwright failure artifacts (`test-results/`) to inspect traces/screenshots for startup vs payload vs browser-application regressions
-
 ## Notes
 - The BAM index must exist next to the BAM file (sample.bam.bai or sample.bai).
 - Edge mode requires both `.bam` and `.bai` files loaded in the browser.
