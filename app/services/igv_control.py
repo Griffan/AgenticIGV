@@ -15,6 +15,7 @@ import json
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRESET_DIR = PROJECT_ROOT / "resource" / "igv_presets"
+PRESET_PUBLIC_DIR = Path("resource") / "igv_presets"
 
 
 AllowedPresetName = Literal["sv", "snv", "cnv"]
@@ -112,7 +113,15 @@ def validate_preset_asset(payload: Any, source: str) -> PresetAsset:
 
 
 def load_preset_asset(name: str) -> tuple[PresetAsset, Path]:
-    preset_path = PRESET_DIR / f"{name}.json"
+    if name not in DEFAULT_BASELINE:
+        raise FileNotFoundError(f"Unknown preset '{name}'")
+
+    preset_path = (PRESET_DIR / f"{name}.json").resolve()
+    try:
+        preset_path.relative_to(PRESET_DIR.resolve())
+    except ValueError as exc:
+        raise FileNotFoundError(f"Unknown preset '{name}'") from exc
+
     if not preset_path.exists():
         raise FileNotFoundError(f"Unknown preset '{name}'")
     try:
@@ -150,7 +159,7 @@ def _load_preset_baseline(
 
     base_igv = dict(DEFAULT_BASELINE[preset_asset["name"]])
     base_igv.update(preset_asset["igv"])
-    preset_path_value = str(preset_path)
+    preset_path_value = (PRESET_PUBLIC_DIR / f"{preset_asset['name']}.json").as_posix()
     applied.append({
         "key": f"preset:{preset}",
         "action": "applied",

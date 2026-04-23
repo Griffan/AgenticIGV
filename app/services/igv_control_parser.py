@@ -18,8 +18,53 @@ BOOLEAN_FALSE_TOKENS = {"false", "off", "no", "disable", "disabled"}
 
 FUZZY_MATCH_THRESHOLD: float = 70.0
 
+FUZZY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "at",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "set",
+    "the",
+    "to",
+    "with",
+}
+
+FUZZY_HINT_KEYWORDS = {
+    "center",
+    "color",
+    "colour",
+    "coverage",
+    "guide",
+    "height",
+    "insert",
+    "map",
+    "mapq",
+    "max",
+    "min",
+    "name",
+    "names",
+    "navigation",
+    "pair",
+    "pairs",
+    "quality",
+    "read",
+    "ruler",
+    "show",
+    "strand",
+    "threshold",
+    "track",
+    "view",
+}
+
 NUMERIC_ALIASES: dict[str, list[str]] = {
-    "trackHeight": [r"track\s*height", r"trackheight"],
+    "trackHeight": [r"track\s*height", r"trackheight", r"track\s*ht"],
     "minMapQuality": [r"min(?:imum)?\s*map(?:ping)?\s*quality", r"min\s*mapq", r"mapq"],
     "maxInsertSize": [r"max(?:imum)?\s*insert\s*size"],
     "coverageThreshold": [r"coverage\s*threshold"],
@@ -97,6 +142,33 @@ def _normalize_option_key(token: str, parse_notes: list[str]) -> Optional[str]:
     return _OPTION_CANDIDATES[best_candidate]
 
 
+def _should_attempt_fuzzy_option(token: str) -> bool:
+    cleaned = re.sub(r"[^a-zA-Z\s]", " ", token).strip().lower()
+    if not cleaned:
+        return False
+
+    words = [word for word in cleaned.split() if word]
+    if not words:
+        return False
+
+    while words and words[0] in FUZZY_STOPWORDS:
+        words.pop(0)
+    while words and words[-1] in FUZZY_STOPWORDS:
+        words.pop()
+    if not words:
+        return False
+
+    if len(words) == 1 and len(words[0]) < 3:
+        return False
+
+    phrase = " ".join(words)
+    if phrase in _OPTION_CANDIDATES:
+        return True
+
+    compact = "".join(words)
+    return any(keyword in compact for keyword in FUZZY_HINT_KEYWORDS)
+
+
 def _extract_preset(text: str) -> Optional[str]:
     # Generic "<name> preset" request. Keep unknown names for explicit resolver failures.
     preset_match = re.search(r"\b([a-z][\w-]*)\s+preset\b", text, re.IGNORECASE)
@@ -110,11 +182,11 @@ def _extract_numeric_overrides(text: str, parse_notes: list[str]) -> Dict[str, i
 
     for key, aliases in NUMERIC_ALIASES.items():
         for alias in aliases:
-            exact = re.search(rf"\b{key}\b(?:\s*[:=]\s*|\s+)(-?\d+)\b", text, re.IGNORECASE)
+            exact = re.search(rf"\b{key}\b(?:\s*[:=]\s*|\s+to\s+|\s+)(-?\d+)\b", text, re.IGNORECASE)
             if exact:
                 overrides[key] = int(exact.group(1))
                 break
-            aliased = re.search(rf"\b{alias}\b(?:\s*[:=]\s*|\s+)(-?\d+)\b", text, re.IGNORECASE)
+            aliased = re.search(rf"\b{alias}\b(?:\s*[:=]\s*|\s+to\s+|\s+)(-?\d+)\b", text, re.IGNORECASE)
             if aliased:
                 overrides[key] = int(aliased.group(1))
                 break
@@ -129,8 +201,7 @@ def _extract_numeric_overrides(text: str, parse_notes: list[str]) -> Dict[str, i
     for m in re.finditer(r"(\S+(?:\s+\S+)?)\s+(-?\d+)\b", text):
         left = m.group(1).strip()
         value = int(m.group(2))
-        # Skip stop-words / already-matched
-        if left.lower() in {"set", "to", "the", "a", "an"}:
+        if not _should_attempt_fuzzy_option(left):
             continue
         canonical = _normalize_option_key(left, parse_notes)
         if canonical and canonical not in overrides and canonical in NUMERIC_PLAIN_ALIASES:
@@ -178,7 +249,7 @@ def _extract_boolean_overrides(text: str, parse_notes: list[str]) -> Dict[str, b
         bool_val = _parse_bool_token(m.group(2))
         if bool_val is None:
             continue
-        if left.lower() in {"set", "to", "the", "a", "an"}:
+        if not _should_attempt_fuzzy_option(left):
             continue
         canonical = _normalize_option_key(left, parse_notes)
         if canonical and canonical not in overrides and canonical in BOOLEAN_PLAIN_ALIASES:

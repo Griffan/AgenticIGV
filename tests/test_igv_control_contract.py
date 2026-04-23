@@ -102,6 +102,19 @@ def test_resolve_control_request_reports_unknown_preset():
     assert result["resolved_igv"]["trackHeight"] == 90
 
 
+def test_load_preset_asset_rejects_traversal_like_name():
+    with pytest.raises(FileNotFoundError):
+        load_preset_asset("../some/other")
+
+
+def test_resolve_control_request_uses_repo_relative_preset_path():
+    result = resolve_control_request("sv")
+
+    assert result["preset_path"] == "resource/igv_presets/sv.json"
+    preset_applied = next(item for item in result["applied"] if item["key"] == "preset:sv")
+    assert preset_applied["value"] == "resource/igv_presets/sv.json"
+
+
 @pytest.mark.parametrize(
     "payload,reason",
     [

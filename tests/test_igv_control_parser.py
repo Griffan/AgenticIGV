@@ -44,16 +44,20 @@ def test_fuzzy_numeric_aliases(input_text, expected_key, expected_value):
     assert result.overrides[expected_key] == expected_value
 
 
-# ---- Case 3: Below-threshold unrecognized token ----
+# ---- Case 3: Incidental tokens are ignored ----
 
-def test_below_threshold_produces_parse_note():
+def test_gibberish_control_like_text_does_not_create_control_request():
     result = parse_control_request("blargopt true")
-    assert result.overrides == {} or "blargopt" not in str(result.overrides), (
-        "Gibberish token should not produce an override"
-    )
-    assert any("blargopt" in note for note in result.parse_notes), (
-        f"Expected a parse_note mentioning 'blargopt', got {result.parse_notes}"
-    )
+    assert result.overrides == {}
+    assert result.parse_notes == []
+    assert result.has_control_request is False
+
+
+def test_region_phrase_does_not_emit_spurious_parse_notes_or_controls():
+    result = parse_control_request("analyze structural variant evidence at 20:59000-61000")
+    assert result.overrides == {}
+    assert result.parse_notes == []
+    assert result.has_control_request is False
 
 
 # ---- Case 4: Regression — exact match still works ----
