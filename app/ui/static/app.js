@@ -555,7 +555,7 @@ async function executeTypedControlPayload(browser, payload, controlResolution, r
   }
 
   try {
-    const reloadNeeded = applyIgvParams(controlParams);
+    const reloadNeeded = applyIgvParams(browser, controlParams);
     if (!reloadNeeded) {
       return createExecutionStatus({
         state: "applied-in-browser",
@@ -583,7 +583,7 @@ async function executeTypedControlPayload(browser, payload, controlResolution, r
       5000,
       "IGV reload timed out while applying controls.",
     );
-    applyIgvParams(controlParams);
+    applyIgvParams(browser, controlParams);
 
     return createExecutionStatus({
       state: "reloaded",
@@ -1279,8 +1279,8 @@ function applyExtractedInputs(message) {
   return extracted;
 }
 
-function applyIgvParams(params) {
-  if (!igvBrowser || !Array.isArray(igvBrowser.trackViews)) {
+function applyIgvParams(browser, params) {
+  if (!browser || !Array.isArray(browser.trackViews)) {
     console.warn("[applyIgvParams] igvBrowser not ready");
     return false;
   }
@@ -1289,29 +1289,29 @@ function applyIgvParams(params) {
   // Browser-level params: apply once, not per-track
   for (const [key, value] of Object.entries(params)) {
     if (key === "showCenterGuide") {
-      igvBrowser.config.showCenterGuide = !!value;
-      igvBrowser.showCenterGuide = !!value;
+      browser.config.showCenterGuide = !!value;
+      browser.showCenterGuide = !!value;
       console.log("[applyIgvParams] showCenterGuide →", !!value);
-      if (typeof igvBrowser.repaint === "function") igvBrowser.repaint();
+      if (typeof browser.repaint === "function") browser.repaint();
 
     } else if (key === "showNavigation") {
-      igvBrowser.config.showNavigation = !!value;
+      browser.config.showNavigation = !!value;
       console.log("[applyIgvParams] showNavigation →", !!value);
       // IGV.js exposes the navbar DOM node via igvBrowser.navbar or a child toolbar element.
       // Walk multiple known attachment points so real and mocked instances both work.
       const navEl =
-        (igvBrowser.navbar && igvBrowser.navbar.container) ||
-        (igvBrowser.navbar && igvBrowser.navbar.toolbar) ||
-        (igvBrowser.toolbar && igvBrowser.toolbar.container) ||
-        (typeof igvBrowser.getNavbarEl === "function" ? igvBrowser.getNavbarEl() : null);
+        (browser.navbar && browser.navbar.container) ||
+        (browser.navbar && browser.navbar.toolbar) ||
+        (browser.toolbar && browser.toolbar.container) ||
+        (typeof browser.getNavbarEl === "function" ? browser.getNavbarEl() : null);
       if (navEl) navEl.style.display = !!value ? "" : "none";
 
     } else if (key === "showRuler") {
-      igvBrowser.config.showRuler = !!value;
+      browser.config.showRuler = !!value;
       console.log("[applyIgvParams] showRuler →", !!value);
       // IGV.js ruler lives on the sequence/ruler track view, not on individual alignment viewports.
       // The rulerSweeper path is kept as a fallback; the primary path is the ruler track container.
-      igvBrowser.trackViews.forEach(rtv => {
+      browser.trackViews.forEach(rtv => {
         // Primary: ruler track exposes its own container
         if (rtv.track && (rtv.track.type === "ruler" || rtv.track.type === "sequence")) {
           if (rtv.container) {
@@ -1328,7 +1328,7 @@ function applyIgvParams(params) {
     }
   }
 
-  igvBrowser.trackViews.forEach(tv => {
+  browser.trackViews.forEach(tv => {
     const track = tv.track;
     if (!track) return;
     console.log("[applyIgvParams] track.type =", track.type, "params =", params);

@@ -29,6 +29,7 @@ AllowedIgvKey = Literal[
     "maxInsertSize",
     "coverageThreshold",
     "viewAsPairs",
+    "showSoftClips",
 ]
 
 
@@ -74,6 +75,7 @@ ALLOWED_OVERRIDE_KEYS = {
     "maxInsertSize",
     "coverageThreshold",
     "viewAsPairs",
+    "showSoftClips",
 }
 
 
