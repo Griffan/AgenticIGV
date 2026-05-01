@@ -6,7 +6,7 @@ const TEST_REGION = '20:59000-61000';
 
 async function bootPathMode(page) {
   // Keep the UI fully offline/deterministic in CI where public CDN fetches are blocked.
-  await page.route('https://cdn.jsdelivr.net/npm/marked/marked.min.js', async (route) => {
+  await page.route('**/static/marked.min.js', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/javascript',
