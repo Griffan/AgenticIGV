@@ -1349,20 +1349,17 @@ function applyIgvParams(browser, params) {
             track.featureSource.setViewAsPairs(!!value);
             console.log("[applyIgvParams] featureSource.setViewAsPairs →", !!value);
           }
-          // Try in-memory re-pair first (works when data is already loaded)
-          const containers = (tv.viewports || []).map(vp => vp.cachedFeatures);
-          let repairedInMemory = false;
-          containers.forEach(container => {
-            if (container && typeof container.setViewAsPairs === "function") {
-              container.setViewAsPairs(!!value);
-              repairedInMemory = true;
-              console.log("[applyIgvParams] container.setViewAsPairs →", !!value);
-            }
-          });
-          if (repairedInMemory && typeof tv.repaintViews === "function") {
+          // Clear the feature cache so updateViews() re-fetches from the BAM source
+          // with the new pairing flag, rather than serving the already-cached range.
+          // track.clearCachedFeatures() delegates to trackView.clearCachedFeatures().
+          if (typeof track.clearCachedFeatures === "function") {
+            track.clearCachedFeatures();
+          }
+          if (typeof tv.updateViews === "function") {
+            tv.updateViews();
+          } else if (typeof tv.repaintViews === "function") {
             tv.repaintViews();
           } else {
-            // Data not yet loaded — flag for reload
             dataReloadNeeded = true;
           }
 

@@ -82,6 +82,36 @@
         <h2>Chat</h2>
         <div id="svSummary" class="sv-summary hidden">SV: not assessed</div>
 
+        <div id="controlSummary" class="control-summary hidden" data-testid="control-summary">
+          <div class="control-summary-header">
+            <h3>IGV Control</h3>
+            <span id="controlSummarySource" class="control-source" data-testid="control-source"></span>
+          </div>
+          <div class="control-grid">
+            <div class="control-column">
+              <h4>Applied</h4>
+              <ul id="controlAppliedList" class="control-list" data-testid="control-applied-list"></ul>
+            </div>
+            <div class="control-column">
+              <h4>Skipped</h4>
+              <ul id="controlSkippedList" class="control-list" data-testid="control-skipped-list"></ul>
+            </div>
+            <div class="control-column">
+              <h4>Failed</h4>
+              <ul id="controlFailedList" class="control-list" data-testid="control-failed-list"></ul>
+            </div>
+          </div>
+          <div class="control-notes">
+            <h4>Parse Notes</h4>
+            <ul id="controlParseNotes" class="control-list" data-testid="control-parse-notes"></ul>
+          </div>
+          <div id="controlExecutionSummary" class="control-execution hidden" data-testid="control-execution-summary">
+            <h4>Execution</h4>
+            <p id="controlExecutionHeadline" class="control-execution-headline" data-testid="control-execution-headline"></p>
+            <ul id="controlExecutionDetails" class="control-list" data-testid="control-execution-details"></ul>
+          </div>
+        </div>
+
         <div id="messages" class="messages"></div>
         <div class="composer">
           <input id="messageInput" placeholder="Ask: 'Load chr20:60000-61000' or 'What's the coverage?' or 'Show mismatches'" />
