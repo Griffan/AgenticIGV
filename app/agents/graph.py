@@ -66,13 +66,6 @@ def _extract_region(text: str) -> Optional[str]:
     return match.group(1)
 
 
-def _extract_bam_path(text: str) -> Optional[str]:
-    match = BAM_PATH_FINDER.search(text)
-    if not match:
-        return None
-    return match.group(1)
-
-
 def _extract_bam_paths(text: str) -> list[str]:
     matches = BAM_PATH_FINDER.findall(text)
     # Keep encounter order stable and remove duplicates.

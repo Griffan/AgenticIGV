@@ -36,6 +36,25 @@ const edgeBaiFileInput = document.getElementById("edgeBaiFile");
 const edgeFastaFileInput = document.getElementById("edgeFastaFile");
 const edgeFaiFileInput = document.getElementById("edgeFaiFile");
 
+function isDebugMode() {
+  return new URLSearchParams(location.search).has("debug");
+}
+
+const debugToggle = document.getElementById("debugToggle");
+if (debugToggle) {
+  debugToggle.textContent = isDebugMode() ? "Debug: ON" : "Debug: OFF";
+  debugToggle.classList.toggle("debug-toggle-active", isDebugMode());
+  debugToggle.addEventListener("click", () => {
+    const url = new URL(location.href);
+    if (isDebugMode()) {
+      url.searchParams.delete("debug");
+    } else {
+      url.searchParams.set("debug", "");
+    }
+    location.assign(url.toString());
+  });
+}
+
 let runMode = "path";
 let igvBrowser = null;
 let currentSourceKey = null;
@@ -747,7 +766,9 @@ function renderControlSummary(payload) {
   setControlList(controlFailedList, normalized.failed);
   setControlNotes(controlParseNotes, normalized.parse_notes);
 
-  controlSummary.classList.remove("hidden");
+  if (isDebugMode()) {
+    controlSummary.classList.remove("hidden");
+  }
   return normalized;
 }
 
@@ -766,7 +787,9 @@ function renderExecutionStatus(status = createExecutionStatus()) {
   }
 
   controlExecutionSummary.className = summaryClass.join(" ");
-  controlExecutionSummary.classList.remove("hidden");
+  if (isDebugMode()) {
+    controlExecutionSummary.classList.remove("hidden");
+  }
   controlExecutionSummary.dataset.state = status.state;
 
   controlExecutionHeadline.textContent = status.message;

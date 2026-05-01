@@ -117,7 +117,7 @@ test.describe('typed control feedback', () => {
       });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.fill('#messageInput', 'apply typed controls and analyze');
     await page.click('#sendMessage');
 
@@ -201,7 +201,7 @@ test.describe('typed control feedback', () => {
       });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.fill('#messageInput', 'reload controls');
     await page.click('#sendMessage');
 
@@ -254,7 +254,7 @@ test.describe('typed control feedback', () => {
       });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.evaluate(() => {
       window.__PW_FAIL_SEARCH__ = true;
     });

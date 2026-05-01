@@ -136,7 +136,7 @@ test.describe('viewAsPairs control', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: chatPayload(true) });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.fill('#messageInput', 'show reads as pairs at 20:59000-61000');
     await page.click('#sendMessage');
 
@@ -191,7 +191,7 @@ test.describe('viewAsPairs control', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: chatPayload(false) });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.fill('#messageInput', 'turn off view as pairs at 20:59000-61000');
     await page.click('#sendMessage');
 
@@ -223,7 +223,7 @@ test.describe('viewAsPairs control', () => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: chatPayload(true) });
     });
 
-    await page.goto('/');
+    await page.goto('/?debug');
     await page.fill('#messageInput', 'view as pairs at 20:59000-61000');
     await page.click('#sendMessage');
 
