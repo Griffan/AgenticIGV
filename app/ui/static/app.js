@@ -22,6 +22,11 @@ if (fastaPathInput && !fastaPathInput.value) {
   fastaPathInput.value = "resource/chr20.fa";
 }
 const regionInput = document.getElementById("region");
+// Prefill region with a sensible default that matches the bundled fixture so
+// the Load button works out-of-the-box; user input is never overwritten.
+if (regionInput && !regionInput.value && bamPathInput?.value === "resource/test.bam") {
+  regionInput.value = "20:59000-61000";
+}
 const currentRegionBadge = document.getElementById("currentRegionBadge");
 const loadRegion = document.getElementById("loadRegion");
 const igvContainer = document.getElementById("igv-container");
@@ -1480,8 +1485,22 @@ async function fetchChat() {
         payload.bam_path = rawBamInput || fallbackBamPath;
       }
       payload.fasta_path = (extracted.fastaPath || fastaPathInput.value || "").trim();
+      // Gate analysis on a real BAM source. Without one, the backend would
+      // otherwise produce a misleading "analysis" answer from no data.
+      if (!payload.bam_path) {
+        loadingMsg.remove();
+        appendMessage("Load a BAM file first (Path mode requires a BAM path).");
+        return;
+      }
     } else {
       if (!region) throw new Error("Provide a region for Edge mode chat analysis.");
+      // Edge mode also requires at least one loaded BAM before analysis.
+      const hasEdgeBam = edgeFiles.tracks.length > 0 || Boolean(edgeFiles.bam);
+      if (!hasEdgeBam) {
+        loadingMsg.remove();
+        appendMessage("Load a BAM file first (Edge mode requires a BAM + BAI).");
+        return;
+      }
       const browser = await ensureBrowser(region);
       await browser.search(region);
       const edgePayload = await extractEdgeSignals(region);
@@ -1645,33 +1664,67 @@ async function fetchChat() {
 }
 
 async function fetchRegion() {
-  const region = regionInput.value.trim();
-  if (!region) {
-    appendMessage("Provide a region first.");
-    return;
-  }
-  if (!parseRegion(region)) {
-    appendMessage("Region format should look like chr1:100-200");
-    return;
-  }
-
+  // Re-entrancy guard: rapid double clicks (or duplicate handlers) must not
+  // produce duplicate "Provide a region first." toasts.
+  if (fetchRegion._inflight) return;
+  fetchRegion._inflight = true;
   try {
+    const region = regionInput.value.trim();
+    if (!region) {
+      appendMessage("Provide a region first.");
+      return;
+    }
+    if (!parseRegion(region)) {
+      appendMessage("Region format should look like chr1:100-200");
+      return;
+    }
+
     if (runMode === "path") {
       const bamPath = (bamPathInput.value || "").trim();
       if (!bamPath) {
         appendMessage("Provide a BAM path in Path mode.");
         return;
       }
+      // Explicit contig-name validation: the bundled fixture uses '20', not
+      // 'chr20'. Catch the mismatch here with an actionable message instead of
+      // letting IGV.js silently render an empty browser.
+      const parsed = parseRegion(region);
+      if (parsed?.contig) {
+        try {
+          const chromosomes = await fetchPathChromosomes(bamPath);
+          const names = chromosomes.map((c) => c.name);
+          if (!names.includes(parsed.contig)) {
+            const alt = parsed.contig.startsWith("chr")
+              ? parsed.contig.slice(3)
+              : `chr${parsed.contig}`;
+            const suggestion = names.includes(alt)
+              ? ` Try '${alt}:${parsed.start ?? ""}-${parsed.end ?? ""}' instead.`
+              : "";
+            appendMessage(
+              `Contig '${parsed.contig}' is not in the BAM header.` + suggestion
+              + ` Available contigs: ${names.slice(0, 8).join(", ")}${names.length > 8 ? "…" : ""}`
+            );
+            return;
+          }
+        } catch (headerErr) {
+          appendMessage(`Could not read BAM header to validate contig: ${headerErr.message || headerErr}`);
+          return;
+        }
+      }
     } else if (!edgeFiles.bam || !edgeFiles.bai) {
       appendMessage("Select BAM and BAI files in Edge mode first.");
       return;
     }
 
-    const browser = await ensureBrowser(region);
-    await browser.search(region);
-    appendMessage(`Loaded ${region} in IGV.`);
-  } catch (error) {
-    appendMessage(error.message || "Failed to load IGV region.");
+    try {
+      const browser = await ensureBrowser(region);
+      await browser.search(region);
+      appendMessage(`Loaded ${region} in IGV.`);
+    } catch (error) {
+      appendMessage(error.message || "Failed to load IGV region.");
+    }
+  } finally {
+    fetchRegion._inflight = false;
   }
 }
 

@@ -665,7 +665,7 @@ def test_chat_igv_params_and_feedback(monkeypatch):
             return {
                 "response": "Parameters updated.",
                 "igv_params": {"trackHeight": 150, "showReadNames": True},
-                "igv_feedback": "IGV parameters updated: {'trackHeight': 150, 'showReadNames': True}",
+                "igv_feedback": "IGV parameters updated: showReadNames=true, trackHeight=150",
                 "preset": "sv",
                 "region": payload.get("region", "chr1:1-2"),
             }
@@ -1128,7 +1128,7 @@ def test_agent_response_agent_formats_chatresponse(monkeypatch):
         "coverage": [],
         "reads": [],
         "igv_params": {"trackHeight": 150},
-        "igv_feedback": "IGV parameters updated: {'trackHeight': 150}",
+        "igv_feedback": "IGV parameters updated: trackHeight=150",
         "response": "IGV settings updated.",
         "mode": "path",
     }

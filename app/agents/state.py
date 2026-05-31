@@ -30,6 +30,7 @@ class ChatState(TypedDict, total=False):
     extracted_info: Dict[str, Any]
 
     variant_assessment: Dict[str, Any]
+    per_track_variant_assessments: Dict[str, Dict[str, Any]]
 
     igv_params: Optional[Dict[str, Any]]
     igv_feedback: Optional[str]

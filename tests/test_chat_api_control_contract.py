@@ -217,3 +217,112 @@ def test_chat_response_rejects_malformed_control_resolution_shape(monkeypatch):
     assert response.status_code == 400
     assert "ControlResolutionPayload" in response.json()["detail"]
     assert "preset_source" in response.json()["detail"]
+
+
+def test_chat_response_igv_feedback_is_readable_not_raw_dict(monkeypatch):
+    """igv_feedback must render resolved overrides as key=value pairs, not a dict repr."""
+
+    class DummyGraph:
+        def invoke(self, _payload):
+            return {
+                "response": "Control updated.",
+                "coverage": [],
+                "reads": [],
+                "control_resolution": {
+                    "preset": "sv",
+                    "preset_source": "resource",
+                    "preset_path": "resource/igv_presets/sv.json",
+                    "base_igv": {"trackHeight": 120},
+                    "resolved_igv": {
+                        "trackHeight": 180,
+                        "showCenterGuide": True,
+                        "showNavigation": False,
+                    },
+                    "applied": [
+                        {
+                            "key": "preset:sv",
+                            "action": "applied",
+                            "reason": "Loaded preset asset",
+                            "value": "resource/igv_presets/sv.json",
+                        },
+                        {
+                            "key": "trackHeight",
+                            "action": "applied",
+                            "reason": "Applied direct override",
+                            "value": 180,
+                        },
+                    ],
+                    "skipped": [],
+                    "failed": [],
+                    "parse_notes": [],
+                },
+            }
+
+    monkeypatch.setattr(main, "_graph", DummyGraph())
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "switch to sv preset with trackHeight 180",
+            "mode": "path",
+            "bam_path": str(RESOURCE_BAM),
+            "region": "20:59000-61000",
+        },
+    )
+
+    assert response.status_code == 200
+    feedback = response.json()["igv_feedback"]
+    # Must not leak raw dict repr (no braces, no Python-style key quoting).
+    assert "{" not in feedback
+    assert "}" not in feedback
+    assert "'trackHeight'" not in feedback
+    # Must contain stable key=value pairs (sorted, booleans lowercased).
+    assert "trackHeight=180" in feedback
+    assert "showCenterGuide=true" in feedback
+    assert "showNavigation=false" in feedback
+
+
+def test_chat_response_exposes_per_track_variant_assessments(monkeypatch):
+    """Multi-BAM responses must surface every track's variant assessment."""
+
+    class DummyGraph:
+        def invoke(self, _payload):
+            return {
+                "response": "Two samples analyzed.",
+                "coverage": [],
+                "reads": [],
+                "per_track_variant_assessments": {
+                    "sample_1": {
+                        "sv_present": True,
+                        "sv_type": "DEL",
+                        "confidence": 0.82,
+                        "evidence": ["split reads"],
+                    },
+                    "sample_2": {
+                        "sv_present": False,
+                        "sv_type": None,
+                        "confidence": 0.05,
+                        "evidence": [],
+                    },
+                },
+            }
+
+    monkeypatch.setattr(main, "_graph", DummyGraph())
+
+    client = TestClient(main.app)
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "compare samples",
+            "mode": "path",
+            "bam_path": str(RESOURCE_BAM),
+            "region": "20:59000-61000",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload["per_track_variant_assessments"].keys()) == {"sample_1", "sample_2"}
+    assert payload["per_track_variant_assessments"]["sample_1"]["sv_type"] == "DEL"
+    assert payload["per_track_variant_assessments"]["sample_2"]["sv_present"] is False

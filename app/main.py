@@ -4,11 +4,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
+
+# Load environment variables from project root BEFORE importing modules that
+# inspect credentials at import time (e.g. agents.graph). This guarantees the
+# LLM gating reflects the user's .env regardless of import order.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .agents.graph import build_graph
 from .llm import validate_llm_config
@@ -16,10 +23,6 @@ from .services.bam import get_coverage, get_reads
 from .services.chat_contracts import ChatContract, ContractError, normalize_chat_request
 import pysam
 
-
-# Load environment variables from project root
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "ui" / "static"
@@ -110,6 +113,10 @@ class ChatResponse(BaseModel):
     control_resolution: Optional[ControlResolutionPayload] = None
     bam_tracks: List[Dict[str, Any]] = Field(default_factory=list)
     per_track_results: Dict[str, Any] = Field(default_factory=dict)
+    # Full per-sample SV assessment map so multi-track requests surface every
+    # track's evidence, not just the first one (backward-compat fields above
+    # continue to mirror the first successful assessment).
+    per_track_variant_assessments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlResolutionPayload]:
@@ -118,11 +125,39 @@ def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlR
     if isinstance(raw_control_resolution, ControlResolutionPayload):
         return raw_control_resolution
     if isinstance(raw_control_resolution, dict):
-        return ControlResolutionPayload.model_validate(raw_control_resolution)
-    raise ValueError("control_resolution must be an object when present")
+        try:
+            return ControlResolutionPayload.model_validate(raw_control_resolution)
+        except ValidationError as exc:
+            # Surface schema drift loudly so the chat pipeline does not silently
+            # drop a malformed control payload.
+            raise ValueError(
+                f"ControlResolutionPayload validation failed: {exc.errors()}"
+            ) from exc
+    raise ValueError(
+        f"control_resolution must be an object when present, got {type(raw_control_resolution).__name__}"
+    )
+
+
+def _format_resolved_overrides(params: Any) -> str:
+    """Render resolved IGV params as a stable, human-readable summary.
+
+    Avoids leaking raw ``dict`` repr (with quotes/braces) into chat feedback.
+    """
+    if not isinstance(params, dict) or not params:
+        return "no overrides"
+    parts: list[str] = []
+    for key in sorted(params.keys()):
+        value = params[key]
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        parts.append(f"{key}={rendered}")
+    return ", ".join(parts)
 
 
 def _derive_igv_feedback_from_control_resolution(control_resolution: ControlResolutionPayload) -> str:
+    rendered = _format_resolved_overrides(control_resolution.resolved_igv)
     if control_resolution.preset:
         preset_key = f"preset:{control_resolution.preset}"
         if any(item.key == preset_key and item.action == "failed" for item in control_resolution.failed):
@@ -133,13 +168,10 @@ def _derive_igv_feedback_from_control_resolution(control_resolution: ControlReso
             for item in control_resolution.applied
         )
         if has_direct_overrides:
-            return (
-                f"Preset '{control_resolution.preset}' applied with overrides: "
-                f"{control_resolution.resolved_igv}"
-            )
-        return f"Preset '{control_resolution.preset}' applied: {control_resolution.resolved_igv}"
+            return f"Preset '{control_resolution.preset}' applied with overrides: {rendered}"
+        return f"Preset '{control_resolution.preset}' applied: {rendered}"
 
-    return f"IGV parameters updated: {control_resolution.resolved_igv}"
+    return f"IGV parameters updated: {rendered}"
 
 
 class RegionRequest(BaseModel):
@@ -331,6 +363,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             control_resolution=typed_control_resolution,
             bam_tracks=result.get("bam_tracks", []),
             per_track_results=result.get("per_track_results", {}),
+            per_track_variant_assessments=result.get("per_track_variant_assessments", {}),
         )
     except ContractError as exc:
         if DEBUG:

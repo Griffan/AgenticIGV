@@ -74,7 +74,7 @@ Response:
 
 ```json
 {
-  "response": "Preset 'sv' applied with overrides: {'trackHeight': 180}",
+  "response": "Preset 'sv' applied with overrides: trackHeight=180",
   "coverage": [],
   "reads": [],
   "region": "20:59000-61000",
@@ -123,11 +123,20 @@ Response:
     "showCenterGuide": true,
     "minMapQuality": 20
   },
-  "igv_feedback": "Preset 'sv' applied with overrides: {...}",
+  "igv_feedback": "Preset 'sv' applied with overrides: trackHeight=180",
   "preset": "sv",
 
   "bam_tracks": [],
-  "per_track_results": {}
+  "per_track_results": {},
+  "per_track_variant_assessments": {
+    "sample_1": {
+      "sv_present": true,
+      "sv_type": "DEL",
+      "confidence": 0.82,
+      "evidence": ["split reads at 20:60000"],
+      "metrics": {}
+    }
+  }
 }
 ```
 
@@ -157,7 +166,8 @@ Response:
 - Compatibility fields are additive only:
   - `igv_params` mirrors `control_resolution.resolved_igv`
   - `preset` mirrors `control_resolution.preset`
-  - `igv_feedback` is preserved when provided, otherwise deterministically derived from typed control resolution
+  - `igv_feedback` is preserved when provided, otherwise deterministically derived from typed control resolution as a stable, human-readable `key=value` summary (booleans rendered as `true`/`false`; keys sorted)
+  - `per_track_variant_assessments` exposes the SV assessment for every analyzed sample, not just the first one mirrored into the legacy `variant_assessment` field
 
 ### Redaction and boundary constraints
 

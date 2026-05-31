@@ -199,3 +199,65 @@ def test_chat_api_reports_invalid_preset_resolution(monkeypatch):
 
     assert result["control_resolution"]["failed"]
     assert result["igv_feedback"] == "Preset 'nope' not recognized."
+
+
+def test_normalize_llm_intent_result_coerces_bedrock_string_types():
+    """Bedrock can return numeric/bool overrides as strings — normalize before contract validation."""
+    from app.agents import graph as graph_module
+
+    raw = {
+        "intent": "adjust_igv",
+        "region": "20:59000-61000",
+        "preset": "sv",
+        "igv_params": {
+            "trackHeight": "180",
+            "showNavigation": "true",
+            "showCenterGuide": "False",
+            "minMapQuality": 25,
+            "unknownKey": "ignored",
+        },
+    }
+    result = graph_module._normalize_llm_intent_result(raw)
+
+    assert result["intent"] == "adjust_igv"
+    assert result["preset"] == "sv"
+    igv_params = result["igv_params"]
+    assert igv_params["trackHeight"] == 180
+    assert isinstance(igv_params["trackHeight"], int)
+    assert igv_params["showNavigation"] is True
+    assert igv_params["showCenterGuide"] is False
+    assert igv_params["minMapQuality"] == 25
+    # Unknown keys are filtered out before reaching the strict contract validator.
+    assert "unknownKey" not in igv_params
+
+
+def test_intent_agent_resolves_bedrock_string_override_into_typed_resolution(monkeypatch):
+    """End-to-end: a Bedrock-style LLM result must flow through resolve_control_contract cleanly."""
+    from app.agents import graph as graph_module
+
+    monkeypatch.setattr(graph_module, "USE_LLM", True)
+
+    class _DummyResponse:
+        content = (
+            '{"intent": "adjust_igv", "region": "20:59000-61000", '
+            '"preset": "sv", "igv_params": {"trackHeight": "180", "showNavigation": "true"}}'
+        )
+
+    class _DummyLLM:
+        def invoke(self, _messages):
+            return _DummyResponse()
+
+    monkeypatch.setattr(graph_module, "get_llm_model", lambda: _DummyLLM())
+
+    result = graph_module.intent_agent({
+        "message": "please make the structural variant view easier to read",
+        "mode": "path",
+        "bam_path": str(Path(__file__).resolve().parent.parent / "resource" / "test.bam"),
+        "region": "20:59000-61000",
+    })
+
+    resolved = result["control_resolution"]["resolved_igv"]
+    assert resolved["trackHeight"] == 180
+    assert isinstance(resolved["trackHeight"], int)
+    assert resolved["showNavigation"] is True
+    assert result["preset"] == "sv"
