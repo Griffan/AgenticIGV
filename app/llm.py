@@ -4,11 +4,50 @@ Provides get_llm_model() function that returns a BaseChatModel instance.
 """
 
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, treating unset/empty/whitespace as the default."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError as e:
+        raise ValueError(
+            f"Environment variable {name}={raw!r} is not a valid integer"
+        ) from e
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var, treating unset/empty/whitespace as the default."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError as e:
+        raise ValueError(
+            f"Environment variable {name}={raw!r} is not a valid number"
+        ) from e
+
+
+def _env_optional_int(name: str) -> Optional[int]:
+    """Read an optional int env var, returning None when unset/empty."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError as e:
+        raise ValueError(
+            f"Environment variable {name}={raw!r} is not a valid integer"
+        ) from e
 
 
 def _create_openai_model() -> BaseChatModel:
@@ -34,9 +73,8 @@ def _create_openai_model() -> BaseChatModel:
     
     model_name = os.getenv("LANGGRAPH_MODEL", "gpt-4o-mini")
     base_url = os.getenv("BASE_URL", "https://api.openai.com/v1")
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
-    max_tokens_str = os.getenv("LLM_MAX_TOKENS")
-    max_tokens = int(max_tokens_str) if max_tokens_str else None
+    temperature = _env_float("LLM_TEMPERATURE", 0.0)
+    max_tokens = _env_optional_int("LLM_MAX_TOKENS")
     
     kwargs = {
         "model": model_name,
@@ -85,21 +123,31 @@ def _create_bedrock_model() -> BaseChatModel:
         )
     
     region = os.getenv("AWS_REGION", "us-east-1")
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
-    max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+    temperature = _env_float("LLM_TEMPERATURE", 0.0)
+    max_tokens = _env_int("LLM_MAX_TOKENS", 1024)
     
-    # Bedrock will use boto3's default credential chain if credentials are not provided
-    # Users can set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY if needed
-    kwargs = {
+    # Bedrock will use boto3's default credential chain if credentials are not provided.
+    # Only forward explicit AWS_* values when actually set so we don't override the chain
+    # with None / empty strings.
+    kwargs: Dict[str, Any] = {
         "model_id": model_id,
         "region_name": region,
         "model_kwargs": {
             "temperature": temperature,
             "max_tokens": max_tokens,
         },
-        "aws_session_token": os.getenv("AWS_ACCESS_KEY_ID"),
     }
-    
+
+    access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+    secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    session_token = (os.getenv("AWS_SESSION_TOKEN") or "").strip()
+    if access_key:
+        kwargs["aws_access_key_id"] = access_key
+    if secret_key:
+        kwargs["aws_secret_access_key"] = secret_key
+    if session_token:
+        kwargs["aws_session_token"] = session_token
+
     return ChatBedrock(**kwargs)
 
 

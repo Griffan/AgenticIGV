@@ -214,9 +214,14 @@ def test_chat_response_rejects_malformed_control_resolution_shape(monkeypatch):
         },
     )
 
-    assert response.status_code == 400
-    assert "ControlResolutionPayload" in response.json()["detail"]
-    assert "preset_source" in response.json()["detail"]
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    # Must NOT leak pydantic schema internals (field names, raw input values)
+    # to clients. Generic message only.
+    assert "preset_source" not in detail
+    assert "ValidationError" not in detail
+    assert "resolved_igv" not in detail
+    assert "malformed" in detail.lower()
 
 
 def test_chat_response_igv_feedback_is_readable_not_raw_dict(monkeypatch):

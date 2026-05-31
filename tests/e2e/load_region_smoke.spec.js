@@ -38,4 +38,10 @@ test('Load region button works with default path inputs', async ({ page }) => {
   console.log('IGV track containers found:', trackViews);
 
   expect(lastText, `Expected success message; got:\n${lastText}`).toContain('Loaded 20:59000-61000 in IGV.');
+  // The point of the smoke test is that the page actually rendered IGV — not
+  // just that a success toast appeared. Without these assertions the test
+  // passes for a wide range of real regressions.
+  expect(consoleErrors, `Unexpected console errors:\n${consoleErrors.join('\n')}`).toHaveLength(0);
+  expect(failedRequests, `Unexpected failed requests:\n${failedRequests.join('\n')}`).toHaveLength(0);
+  expect(trackViews, 'Expected at least one IGV track/viewport to render').toBeGreaterThan(0);
 });

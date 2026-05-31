@@ -21,6 +21,7 @@ from .agents.graph import build_graph
 from .llm import validate_llm_config
 from .services.bam import get_coverage, get_reads
 from .services.chat_contracts import ChatContract, ContractError, normalize_chat_request
+from .services.igv_control import format_resolved_overrides
 import pysam
 
 
@@ -119,6 +120,15 @@ class ChatResponse(BaseModel):
     per_track_variant_assessments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
+class InternalControlResolutionError(Exception):
+    """Raised when the agent graph returns a malformed control resolution.
+
+    Distinct from ``ContractError`` (which signals bad client input) so the
+    HTTP layer can map it to a 500 with a generic message rather than echoing
+    pydantic field-level details to the client.
+    """
+
+
 def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlResolutionPayload]:
     if raw_control_resolution is None:
         return None
@@ -128,36 +138,21 @@ def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlR
         try:
             return ControlResolutionPayload.model_validate(raw_control_resolution)
         except ValidationError as exc:
-            # Surface schema drift loudly so the chat pipeline does not silently
-            # drop a malformed control payload.
-            raise ValueError(
-                f"ControlResolutionPayload validation failed: {exc.errors()}"
+            # Log the verbose validation error for operators; raise a generic
+            # message to clients so we don't leak schema internals (field
+            # names, raw input values) over the public API surface.
+            if DEBUG:
+                print(f"[DEBUG] ControlResolutionPayload validation failed: {exc.errors()}")
+            raise InternalControlResolutionError(
+                "Internal control resolution payload was malformed"
             ) from exc
-    raise ValueError(
-        f"control_resolution must be an object when present, got {type(raw_control_resolution).__name__}"
+    raise InternalControlResolutionError(
+        "Internal control resolution payload had unexpected type"
     )
 
 
-def _format_resolved_overrides(params: Any) -> str:
-    """Render resolved IGV params as a stable, human-readable summary.
-
-    Avoids leaking raw ``dict`` repr (with quotes/braces) into chat feedback.
-    """
-    if not isinstance(params, dict) or not params:
-        return "no overrides"
-    parts: list[str] = []
-    for key in sorted(params.keys()):
-        value = params[key]
-        if isinstance(value, bool):
-            rendered = "true" if value else "false"
-        else:
-            rendered = str(value)
-        parts.append(f"{key}={rendered}")
-    return ", ".join(parts)
-
-
 def _derive_igv_feedback_from_control_resolution(control_resolution: ControlResolutionPayload) -> str:
-    rendered = _format_resolved_overrides(control_resolution.resolved_igv)
+    rendered = format_resolved_overrides(control_resolution.resolved_igv)
     if control_resolution.preset:
         preset_key = f"preset:{control_resolution.preset}"
         if any(item.key == preset_key and item.action == "failed" for item in control_resolution.failed):
@@ -369,6 +364,11 @@ def chat(request: ChatRequest) -> ChatResponse:
         if DEBUG:
             print(f"[DEBUG] ContractError: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InternalControlResolutionError as exc:
+        # Internal schema drift — do not echo pydantic field details to clients.
+        if DEBUG:
+            print(f"[DEBUG] InternalControlResolutionError: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         if DEBUG:
             print(f"[DEBUG] Exception: {exc}")

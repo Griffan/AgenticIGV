@@ -80,6 +80,26 @@ ALLOWED_OVERRIDE_KEYS = {
 }
 
 
+def format_resolved_overrides(params: Any) -> str:
+    """Render resolved IGV params as a stable, human-readable summary.
+
+    Output format: ``key=value`` pairs sorted by key, booleans as ``true``/``false``.
+    Centralized here so chat-feedback strings stay identical across the agent
+    graph and the API response derivation.
+    """
+    if not isinstance(params, dict) or not params:
+        return "no overrides"
+    parts: List[str] = []
+    for key in sorted(params.keys()):
+        value = params[key]
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value)
+        parts.append(f"{key}={rendered}")
+    return ", ".join(parts)
+
+
 def _ensure_bool(value: Any, key: str, failures: List[ControlResult]) -> Optional[bool]:
     if isinstance(value, bool):
         return value

@@ -10,7 +10,11 @@ from langgraph.graph import END, StateGraph
 
 from app.agents.state import ChatState
 from app.services.bam import get_coverage, get_reads, summarize_coverage
-from app.services.igv_control import ALLOWED_OVERRIDE_KEYS, resolve_control_contract
+from app.services.igv_control import (
+    ALLOWED_OVERRIDE_KEYS,
+    format_resolved_overrides,
+    resolve_control_contract,
+)
 from app.services.igv_control_parser import parse_control_request
 from app.llm import get_llm_model
 
@@ -40,25 +44,6 @@ def _llm_enabled() -> bool:
     return bool(USE_LLM)
 
 
-def _format_overrides_readable(params: Dict[str, Any]) -> str:
-    """Render an IGV params dict as a stable, human-friendly summary.
-
-    Example: ``trackHeight=120, showCenterGuide=true`` instead of the raw
-    ``repr`` of a Python dict which leaks quotes and braces into chat output.
-    """
-    if not isinstance(params, dict) or not params:
-        return "no overrides"
-    parts: list[str] = []
-    for key in sorted(params.keys()):
-        value = params[key]
-        if isinstance(value, bool):
-            rendered = "true" if value else "false"
-        else:
-            rendered = str(value)
-        parts.append(f"{key}={rendered}")
-    return ", ".join(parts)
-
-
 def _build_control_feedback(
     preset: Optional[str],
     has_overrides: bool,
@@ -68,7 +53,7 @@ def _build_control_feedback(
     resolved = resolution.get("resolved_igv", {}) or {}
     failed_items = resolution.get("failed", []) or []
     preset_failed = any(item.get("key") == f"preset:{preset}" for item in failed_items)
-    rendered = _format_overrides_readable(resolved)
+    rendered = format_resolved_overrides(resolved)
 
     if preset and preset_failed:
         return f"Preset '{preset}' not recognized."
@@ -98,6 +83,10 @@ def _apply_control_to_state(
         user_presets=state.get("user_presets", {}),
         parse_notes=notes,
     )
+    # `resolve_control_contract` returns a fresh ``ControlResolution``
+    # TypedDict per call; convert to a plain dict for the state slot which is
+    # typed as ``Dict[str, Any]``. No deeper copy is needed because nested
+    # lists/dicts are already freshly constructed by the resolver.
     state["control_resolution"] = dict(resolution)
     state["control_parse_notes"] = notes
     state["preset"] = preset
@@ -132,8 +121,11 @@ def _coerce_override_value(key: str, value: Any) -> Any:
     well-known keys robust without weakening the downstream validator.
     """
     if key in _INT_OVERRIDE_KEYS:
+        # Booleans are an int subclass in Python, but `_ensure_int` in the
+        # contract checks `isinstance(value, bool)` first and rejects them, so
+        # we can safely pass bools through unchanged.
         if isinstance(value, bool):
-            return value  # let validator reject booleans for numeric keys
+            return value
         if isinstance(value, int):
             return value
         if isinstance(value, float) and value.is_integer():
@@ -174,6 +166,21 @@ def _normalize_llm_overrides(raw: Any) -> Dict[str, Any]:
     return normalized
 
 
+# Closed set of intents understood by the router (mirrors the Literal in
+# ``ChatState``). Anything else is routed as ``unknown`` so we don't silently
+# fall into ``analysis`` on garbage values like ``"intent": false`` or
+# ``"intent": 0``.
+_KNOWN_INTENTS = {
+    "view_region",
+    "analyze_coverage",
+    "analyze_reads",
+    "analyze_variant",
+    "adjust_igv",
+    "general_question",
+    "unknown",
+}
+
+
 def _normalize_llm_intent_result(raw: Any) -> Dict[str, Any]:
     """Coerce the JSON object returned by the intent prompt into safe types.
 
@@ -185,22 +192,27 @@ def _normalize_llm_intent_result(raw: Any) -> Dict[str, Any]:
         return {"intent": "unknown", "region": None, "igv_params": {}, "preset": None}
 
     intent_value = raw.get("intent")
-    intent_str = str(intent_value).strip().lower() if intent_value is not None else "unknown"
+    if isinstance(intent_value, str):
+        intent_str = intent_value.strip().lower()
+    else:
+        intent_str = "unknown"
+    if intent_str not in _KNOWN_INTENTS:
+        intent_str = "unknown"
 
     region_value = raw.get("region")
-    if region_value in (None, "", "null"):
+    if not isinstance(region_value, str) or region_value.strip() in ("", "null"):
         region_str: Optional[str] = None
     else:
-        region_str = str(region_value).strip() or None
+        region_str = region_value.strip() or None
 
     preset_value = raw.get("preset")
-    if preset_value in (None, "", "null"):
+    if not isinstance(preset_value, str) or preset_value.strip() in ("", "null"):
         preset_str: Optional[str] = None
     else:
-        preset_str = str(preset_value).strip() or None
+        preset_str = preset_value.strip() or None
 
     return {
-        "intent": intent_str or "unknown",
+        "intent": intent_str,
         "region": region_str,
         "igv_params": _normalize_llm_overrides(raw.get("igv_params")),
         "preset": preset_str,
