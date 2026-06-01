@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from pathlib import Path
@@ -9,7 +10,11 @@ from langgraph.graph import END, StateGraph
 
 from app.agents.state import ChatState
 from app.services.bam import get_coverage, get_reads, summarize_coverage
-from app.services.igv_control import resolve_control_contract
+from app.services.igv_control import (
+    ALLOWED_OVERRIDE_KEYS,
+    format_resolved_overrides,
+    resolve_control_contract,
+)
 from app.services.igv_control_parser import parse_control_request
 from app.llm import get_llm_model
 
@@ -17,7 +22,9 @@ from app.llm import get_llm_model
 # Debug flag (set AGENTIC_IGV_DEBUG=1 to enable debug prints)
 DEBUG = os.getenv("AGENTIC_IGV_DEBUG", "0") == "1"
 
-# Load environment variables from project root
+# Load environment variables from project root before deriving USE_LLM so that
+# the value reflects credentials supplied via .env even when graph is imported
+# before any other startup hook runs.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -25,6 +32,191 @@ REGION_FINDER = re.compile(r"([\w.-]+:\d+[-\.]{1,2}\d+)")
 CONTIG_FINDER = re.compile(r"\b(chr\w+|\d+)\b", re.IGNORECASE)
 BAM_PATH_FINDER = re.compile(r"([~\w./-]+\.bam)\b", re.IGNORECASE)
 USE_LLM = bool(os.getenv("OPENAI_API_KEY") or os.getenv("AWS_ACCESS_KEY_ID"))
+
+
+def _llm_enabled() -> bool:
+    """Single runtime check for LLM availability.
+
+    Tests monkeypatch USE_LLM directly; routing through this helper keeps every
+    branch consistent and makes future strategy changes (e.g. lazy re-eval) a
+    one-line edit.
+    """
+    return bool(USE_LLM)
+
+
+def _build_control_feedback(
+    preset: Optional[str],
+    has_overrides: bool,
+    resolution: Dict[str, Any],
+) -> str:
+    """Generate readable feedback for a resolved control request."""
+    resolved = resolution.get("resolved_igv", {}) or {}
+    failed_items = resolution.get("failed", []) or []
+    preset_failed = any(item.get("key") == f"preset:{preset}" for item in failed_items)
+    rendered = format_resolved_overrides(resolved)
+
+    if preset and preset_failed:
+        return f"Preset '{preset}' not recognized."
+    if preset and has_overrides:
+        return f"Preset '{preset}' applied with overrides: {rendered}"
+    if preset:
+        return f"Preset '{preset}' applied: {rendered}"
+    return f"IGV parameters updated: {rendered}"
+
+
+def _apply_control_to_state(
+    state: ChatState,
+    *,
+    preset: Optional[str],
+    overrides: Optional[Dict[str, Any]],
+    parse_notes: Optional[list[str]],
+) -> None:
+    """Resolve a control request and populate the shared state fields.
+
+    Used by both the deterministic parser branch and the LLM branch of
+    ``intent_agent`` so feedback text and state shape stay in lockstep.
+    """
+    notes = list(parse_notes or [])
+    resolution = resolve_control_contract(
+        preset=preset,
+        direct_overrides=overrides or None,
+        user_presets=state.get("user_presets", {}),
+        parse_notes=notes,
+    )
+    # `resolve_control_contract` returns a fresh ``ControlResolution``
+    # TypedDict per call; convert to a plain dict for the state slot which is
+    # typed as ``Dict[str, Any]``. No deeper copy is needed because nested
+    # lists/dicts are already freshly constructed by the resolver.
+    state["control_resolution"] = dict(resolution)
+    state["control_parse_notes"] = notes
+    state["preset"] = preset
+    state["igv_params"] = resolution["resolved_igv"]
+    state["igv_feedback"] = _build_control_feedback(
+        preset=preset,
+        has_overrides=bool(overrides),
+        resolution=dict(resolution),
+    )
+
+
+_BOOLEAN_TRUE = {"true", "1", "yes", "on"}
+_BOOLEAN_FALSE = {"false", "0", "no", "off"}
+_INT_OVERRIDE_KEYS = {"trackHeight", "minMapQuality", "maxInsertSize", "coverageThreshold"}
+_BOOL_OVERRIDE_KEYS = {
+    "showCenterGuide",
+    "showNavigation",
+    "showRuler",
+    "showReadNames",
+    "colorByStrand",
+    "viewAsPairs",
+    "showSoftClips",
+}
+
+
+def _coerce_override_value(key: str, value: Any) -> Any:
+    """Best-effort coercion of LLM-supplied override values.
+
+    Bedrock and OpenAI sometimes wrap numbers in strings or vice-versa. The
+    typed control contract rejects mismatched types outright, surfacing a
+    confusing ``Int type error`` in chat feedback. Normalizing here keeps
+    well-known keys robust without weakening the downstream validator.
+    """
+    if key in _INT_OVERRIDE_KEYS:
+        # Booleans are an int subclass in Python, but `_ensure_int` in the
+        # contract checks `isinstance(value, bool)` first and rejects them, so
+        # we can safely pass bools through unchanged.
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.lstrip("+-").isdigit():
+                try:
+                    return int(stripped)
+                except ValueError:
+                    return value
+        return value
+    if key in _BOOL_OVERRIDE_KEYS:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if value in (0, 1):
+                return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in _BOOLEAN_TRUE:
+                return True
+            if lowered in _BOOLEAN_FALSE:
+                return False
+        return value
+    return value
+
+
+def _normalize_llm_overrides(raw: Any) -> Dict[str, Any]:
+    """Filter and coerce an LLM-supplied IGV overrides dict."""
+    if not isinstance(raw, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or key not in ALLOWED_OVERRIDE_KEYS:
+            continue
+        normalized[key] = _coerce_override_value(key, value)
+    return normalized
+
+
+# Closed set of intents understood by the router (mirrors the Literal in
+# ``ChatState``). Anything else is routed as ``unknown`` so we don't silently
+# fall into ``analysis`` on garbage values like ``"intent": false`` or
+# ``"intent": 0``.
+_KNOWN_INTENTS = {
+    "view_region",
+    "analyze_coverage",
+    "analyze_reads",
+    "analyze_variant",
+    "adjust_igv",
+    "general_question",
+    "unknown",
+}
+
+
+def _normalize_llm_intent_result(raw: Any) -> Dict[str, Any]:
+    """Coerce the JSON object returned by the intent prompt into safe types.
+
+    Guards against Bedrock-style responses that produce integers or non-string
+    primitives where strings are expected, which previously surfaced to users
+    as ``Int type error`` parse failures.
+    """
+    if not isinstance(raw, dict):
+        return {"intent": "unknown", "region": None, "igv_params": {}, "preset": None}
+
+    intent_value = raw.get("intent")
+    if isinstance(intent_value, str):
+        intent_str = intent_value.strip().lower()
+    else:
+        intent_str = "unknown"
+    if intent_str not in _KNOWN_INTENTS:
+        intent_str = "unknown"
+
+    region_value = raw.get("region")
+    if not isinstance(region_value, str) or region_value.strip() in ("", "null"):
+        region_str: Optional[str] = None
+    else:
+        region_str = region_value.strip() or None
+
+    preset_value = raw.get("preset")
+    if not isinstance(preset_value, str) or preset_value.strip() in ("", "null"):
+        preset_str: Optional[str] = None
+    else:
+        preset_str = preset_value.strip() or None
+
+    return {
+        "intent": intent_str,
+        "region": region_str,
+        "igv_params": _normalize_llm_overrides(raw.get("igv_params")),
+        "preset": preset_str,
+    }
 VARIANT_KEYWORDS = re.compile(
     r"\b(sv|structural variant|variant|deletion|insertion|duplication|inversion|translocation|breakpoint|fusion)\b",
     re.IGNORECASE,
@@ -139,26 +331,12 @@ def intent_agent(state: ChatState) -> ChatState:
     # Pattern parsing takes priority for control extraction, but mixed control+analysis
     # requests should continue to the BAM/variant branch.
     if parsed_control.has_control_request:
-        resolution = resolve_control_contract(
+        _apply_control_to_state(
+            state,
             preset=parsed_control.preset,
-            direct_overrides=parsed_control.overrides,
-            user_presets=state.get("user_presets", {}),
+            overrides=parsed_control.overrides,
             parse_notes=parsed_control.parse_notes,
         )
-        state["control_resolution"] = resolution
-        state["control_parse_notes"] = parsed_control.parse_notes
-        state["preset"] = parsed_control.preset
-        state["igv_params"] = resolution["resolved_igv"]
-
-        preset_failed = any(item.get("key") == f"preset:{parsed_control.preset}" for item in resolution["failed"])
-        if parsed_control.preset and preset_failed:
-            state["igv_feedback"] = f"Preset '{parsed_control.preset}' not recognized."
-        elif parsed_control.preset and parsed_control.overrides:
-            state["igv_feedback"] = f"Preset '{parsed_control.preset}' applied with overrides: {resolution['resolved_igv']}"
-        elif parsed_control.preset:
-            state["igv_feedback"] = f"Preset '{parsed_control.preset}' applied: {resolution['resolved_igv']}"
-        else:
-            state["igv_feedback"] = f"IGV parameters updated: {resolution['resolved_igv']}"
 
         inferred_analysis_intent = _infer_analysis_intent(message)
         if inferred_analysis_intent:
@@ -178,7 +356,7 @@ def intent_agent(state: ChatState) -> ChatState:
 
     # --- End IGV.js parameter extraction ---
 
-    if not USE_LLM:
+    if not _llm_enabled():
         # Fallback: simple pattern matching for intent
         if not region:
             state["response"] = "Please provide a region like chr1:100-200 or 20:59000-61000."
@@ -222,8 +400,8 @@ Respond in JSON format:
             SystemMessage(content=system_prompt),
             HumanMessage(content=message)
         ])
-        import json
-        result = json.loads(_content_to_text(response.content))
+        raw_result = json.loads(_content_to_text(response.content))
+        result = _normalize_llm_intent_result(raw_result)
         state["intent"] = result.get("intent", "unknown")
         state["route_selection"] = "control" if state.get("intent") == "adjust_igv" else "analysis"
         extracted_region = result.get("region")
@@ -231,31 +409,17 @@ Respond in JSON format:
             state["region"] = extracted_region
         elif region:
             state["region"] = region
-        # IGV.js parameter and preset extraction from LLM
-        llm_params = result.get("igv_params") if isinstance(result.get("igv_params"), dict) else {}
+        # IGV.js parameter and preset extraction from LLM (already normalized).
+        llm_params: Dict[str, Any] = result.get("igv_params") or {}
         llm_preset = result.get("preset")
 
         if llm_preset or llm_params:
-            state["preset"] = llm_preset
-            resolution = resolve_control_contract(
+            _apply_control_to_state(
+                state,
                 preset=llm_preset,
-                direct_overrides=llm_params,
-                user_presets=state.get("user_presets", {}),
-                parse_notes=[],
+                overrides=llm_params,
+                parse_notes=None,
             )
-            state["control_resolution"] = resolution
-            state["control_parse_notes"] = []
-            state["igv_params"] = resolution["resolved_igv"]
-
-            preset_failed = any(item.get("key") == f"preset:{llm_preset}" for item in resolution["failed"])
-            if llm_preset and preset_failed:
-                state["igv_feedback"] = f"Preset '{llm_preset}' not recognized."
-            elif llm_preset and llm_params:
-                state["igv_feedback"] = f"Preset '{llm_preset}' applied with overrides: {resolution['resolved_igv']}"
-            elif llm_preset:
-                state["igv_feedback"] = f"Preset '{llm_preset}' applied: {resolution['resolved_igv']}"
-            else:
-                state["igv_feedback"] = f"IGV parameters updated: {resolution['resolved_igv']}"
     except Exception as e:
         if DEBUG:
             print(f"[DEBUG] intent_agent: LLM exception: {e}")
@@ -567,26 +731,33 @@ def variant_agent(state: ChatState) -> ChatState:
     # If we have per-track results, analyze each track independently
     if per_track_results:
         first_successful_assessment = None
-        
+        per_track_assessments: Dict[str, Dict[str, Any]] = {}
+
         for sample_name, track_result in per_track_results.items():
             # Skip tracks with errors
             if track_result.get("error"):
                 continue
-            
+
             # Extract reads and coverage for this track
             reads = track_result.get("reads", [])
             coverage = track_result.get("coverage", [])
-            
+
             # Analyze variant evidence for this track
             variant_assessment = _analyze_variant_for_reads_coverage(reads, coverage, region)
-            
-            # Store per-track variant assessment
+
+            # Store per-track variant assessment in both the track record and
+            # the dedicated multi-track map exposed to callers.
             track_result["variant_assessment"] = variant_assessment
-            
+            per_track_assessments[sample_name] = variant_assessment
+
             # Save first successful assessment for backward compat
             if first_successful_assessment is None:
                 first_successful_assessment = variant_assessment
-        
+
+        # Always publish the per-track map so multi-sample callers get every
+        # assessment, not only the first one.
+        state["per_track_variant_assessments"] = per_track_assessments
+
         # Backward compat: expose first successful track's assessment at top level
         if first_successful_assessment is not None:
             state["variant_assessment"] = first_successful_assessment
@@ -603,95 +774,103 @@ def variant_agent(state: ChatState) -> ChatState:
         # Fallback for backward compat: single-BAM path (no per_track_results yet)
         reads = state.get("reads", [])
         coverage = state.get("coverage", [])
-        
-        state["variant_assessment"] = _analyze_variant_for_reads_coverage(reads, coverage, region)
+
+        single_assessment = _analyze_variant_for_reads_coverage(reads, coverage, region)
+        state["variant_assessment"] = single_assessment
+        # Keep the multi-track map populated with a synthetic single entry so
+        # downstream serializers can rely on the field always existing.
+        state["per_track_variant_assessments"] = {"sample_1": single_assessment}
     
     return state
+
+
+def _collect_track_summaries(
+    per_track_results: Dict[str, Any],
+    active_sample_names: list[str],
+) -> tuple[Dict[str, Dict[str, Any]], list[str]]:
+    """Build per-track summaries shared by fallback and LLM response branches."""
+    track_summaries: Dict[str, Dict[str, Any]] = {}
+    analyzed_samples: list[str] = []
+    if not per_track_results:
+        return track_summaries, analyzed_samples
+
+    for sample_name, track_result in per_track_results.items():
+        if active_sample_names and sample_name not in active_sample_names:
+            continue
+        if track_result.get("error"):
+            track_summaries[sample_name] = {
+                "error": track_result.get("error"),
+                "error_type": track_result.get("error_type"),
+                "coverage_stats": None,
+                "read_count": 0,
+                "variant_assessment": None,
+            }
+            continue
+
+        coverage = track_result.get("coverage", [])
+        reads = track_result.get("reads", [])
+        variant_assessment = track_result.get("variant_assessment", {})
+        coverage_stats = summarize_coverage(coverage) if coverage else {}
+        track_summaries[sample_name] = {
+            "coverage_stats": coverage_stats,
+            "read_count": len(reads),
+            "coverage_count": len(coverage),
+            "variant_assessment": variant_assessment,
+            "error": None,
+        }
+        analyzed_samples.append(sample_name)
+
+    return track_summaries, analyzed_samples
+
+
+def _format_multitrack_fallback(
+    track_summaries: Dict[str, Dict[str, Any]],
+    analyzed_samples: list[str],
+) -> str:
+    """Plain-text fallback summary used when no LLM is available."""
+    response_lines: list[str] = []
+    if analyzed_samples:
+        response_lines.append(f"Analyzed samples: {', '.join(analyzed_samples)}")
+        for sample_name in analyzed_samples:
+            summary_info = track_summaries[sample_name]
+            cov_stats = summary_info.get("coverage_stats", {})
+            if cov_stats:
+                response_lines.append(
+                    f"{sample_name}: Coverage {cov_stats.get('min', 0)}-{cov_stats.get('max', 0)} "
+                    f"(mean {cov_stats.get('mean', 0):.1f}), {summary_info.get('read_count')} reads"
+                )
+
+    error_samples = {name: info for name, info in track_summaries.items() if info.get("error")}
+    if error_samples:
+        if analyzed_samples:
+            response_lines.append("Errors:")
+        for sample_name, error_info in error_samples.items():
+            response_lines.append(
+                f"{sample_name}: {error_info.get('error')} ({error_info.get('error_type', 'unknown')})"
+            )
+    return "; ".join(response_lines)
 
 
 def response_agent(state: ChatState) -> ChatState:
     """Generate intelligent responses with per-track summaries and comparative insights across multiple samples"""
     if state.get("halt"):
         return state
-    
+
     message = state.get("message", "")
     intent = state.get("intent", "unknown")
     region = state.get("region", "")
-    
+
     # Get per-track results if available; otherwise fall back to backward compat
     per_track_results = state.get("per_track_results", {})
     active_sample_names = state.get("active_sample_names", [])
-    
-    # Build per-track summaries
-    track_summaries: Dict[str, Dict[str, Any]] = {}
-    analyzed_samples: list[str] = []
-    
-    if per_track_results:
-        # Multi-BAM path: build summaries for each active track
-        for sample_name, track_result in per_track_results.items():
-            # Filter to active samples
-            if active_sample_names and sample_name not in active_sample_names:
-                continue
-            
-            # Check for error
-            if track_result.get("error"):
-                track_summaries[sample_name] = {
-                    "error": track_result.get("error"),
-                    "error_type": track_result.get("error_type"),
-                    "coverage_stats": None,
-                    "read_count": 0,
-                    "variant_assessment": None,
-                }
-                continue
-            
-            # Extract coverage and reads for this track
-            coverage = track_result.get("coverage", [])
-            reads = track_result.get("reads", [])
-            variant_assessment = track_result.get("variant_assessment", {})
-            
-            # Build summary for this track
-            coverage_stats = summarize_coverage(coverage) if coverage else {}
-            read_count = len(reads)
-            
-            track_summaries[sample_name] = {
-                "coverage_stats": coverage_stats,
-                "read_count": read_count,
-                "coverage_count": len(coverage),
-                "variant_assessment": variant_assessment,
-                "error": None,
-            }
-            analyzed_samples.append(sample_name)
-    
-    if not USE_LLM:
+    track_summaries, analyzed_samples = _collect_track_summaries(
+        per_track_results, active_sample_names
+    )
+
+    if not _llm_enabled():
         # Simple fallback response (backward compat + multi-track)
         if track_summaries:
-            # Multi-BAM summary (including both analyzed and errored samples)
-            response_lines = []
-            
-            # Add analyzed samples
-            if analyzed_samples:
-                samples_str = ", ".join(analyzed_samples)
-                response_lines.append(f"Analyzed samples: {samples_str}")
-                for sample_name in analyzed_samples:
-                    summary_info = track_summaries[sample_name]
-                    cov_stats = summary_info.get("coverage_stats", {})
-                    if cov_stats:
-                        response_lines.append(
-                            f"{sample_name}: Coverage {cov_stats.get('min', 0)}-{cov_stats.get('max', 0)} "
-                            f"(mean {cov_stats.get('mean', 0):.1f}), {summary_info.get('read_count')} reads"
-                        )
-            
-            # Add error samples
-            error_samples = {name: info for name, info in track_summaries.items() if info.get("error")}
-            if error_samples:
-                if analyzed_samples:
-                    response_lines.append("Errors:")
-                for sample_name, error_info in error_samples.items():
-                    response_lines.append(
-                        f"{sample_name}: {error_info.get('error')} ({error_info.get('error_type', 'unknown')})"
-                    )
-            
-            state["response"] = "; ".join(response_lines)
+            state["response"] = _format_multitrack_fallback(track_summaries, analyzed_samples)
         else:
             # Backward compat single-BAM path
             coverage = state.get("coverage", [])
@@ -890,19 +1069,10 @@ Provide a helpful response to the user's question. When multiple samples are ana
         state["response"] = _content_to_text(response.content)
     except Exception as e:
         print(f"LLM response generation failed: {e}")
-        # Fallback with multi-track info
+        # Fallback with multi-track info (shared formatter keeps fallback and
+        # the no-LLM path consistent for multi-sample requests).
         if track_summaries and analyzed_samples:
-            samples_str = ", ".join(analyzed_samples)
-            fallback_parts = [f"Analyzed samples {samples_str} in region {region}:"]
-            for sample_name in analyzed_samples:
-                summary_info = track_summaries[sample_name]
-                cov_stats = summary_info.get("coverage_stats", {})
-                if cov_stats:
-                    fallback_parts.append(
-                        f"  {sample_name}: Coverage {cov_stats.get('min', 0)}-{cov_stats.get('max', 0)} "
-                        f"(mean {cov_stats.get('mean', 0):.1f}), {summary_info.get('read_count')} reads"
-                    )
-            state["response"] = "; ".join(fallback_parts)
+            state["response"] = _format_multitrack_fallback(track_summaries, analyzed_samples)
         elif state.get("coverage"):
             coverage = state.get("coverage", [])
             reads = state.get("reads", [])

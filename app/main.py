@@ -4,22 +4,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
+
+# Load environment variables from project root BEFORE importing modules that
+# inspect credentials at import time (e.g. agents.graph). This guarantees the
+# LLM gating reflects the user's .env regardless of import order.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .agents.graph import build_graph
 from .llm import validate_llm_config
 from .services.bam import get_coverage, get_reads
 from .services.chat_contracts import ChatContract, ContractError, normalize_chat_request
+from .services.igv_control import format_resolved_overrides
 import pysam
 
-
-# Load environment variables from project root
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
 
 APP_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = APP_ROOT / "ui" / "static"
@@ -110,6 +114,19 @@ class ChatResponse(BaseModel):
     control_resolution: Optional[ControlResolutionPayload] = None
     bam_tracks: List[Dict[str, Any]] = Field(default_factory=list)
     per_track_results: Dict[str, Any] = Field(default_factory=dict)
+    # Full per-sample SV assessment map so multi-track requests surface every
+    # track's evidence, not just the first one (backward-compat fields above
+    # continue to mirror the first successful assessment).
+    per_track_variant_assessments: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+class InternalControlResolutionError(Exception):
+    """Raised when the agent graph returns a malformed control resolution.
+
+    Distinct from ``ContractError`` (which signals bad client input) so the
+    HTTP layer can map it to a 500 with a generic message rather than echoing
+    pydantic field-level details to the client.
+    """
 
 
 def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlResolutionPayload]:
@@ -118,11 +135,24 @@ def _coerce_control_resolution(raw_control_resolution: Any) -> Optional[ControlR
     if isinstance(raw_control_resolution, ControlResolutionPayload):
         return raw_control_resolution
     if isinstance(raw_control_resolution, dict):
-        return ControlResolutionPayload.model_validate(raw_control_resolution)
-    raise ValueError("control_resolution must be an object when present")
+        try:
+            return ControlResolutionPayload.model_validate(raw_control_resolution)
+        except ValidationError as exc:
+            # Log the verbose validation error for operators; raise a generic
+            # message to clients so we don't leak schema internals (field
+            # names, raw input values) over the public API surface.
+            if DEBUG:
+                print(f"[DEBUG] ControlResolutionPayload validation failed: {exc.errors()}")
+            raise InternalControlResolutionError(
+                "Internal control resolution payload was malformed"
+            ) from exc
+    raise InternalControlResolutionError(
+        "Internal control resolution payload had unexpected type"
+    )
 
 
 def _derive_igv_feedback_from_control_resolution(control_resolution: ControlResolutionPayload) -> str:
+    rendered = format_resolved_overrides(control_resolution.resolved_igv)
     if control_resolution.preset:
         preset_key = f"preset:{control_resolution.preset}"
         if any(item.key == preset_key and item.action == "failed" for item in control_resolution.failed):
@@ -133,13 +163,10 @@ def _derive_igv_feedback_from_control_resolution(control_resolution: ControlReso
             for item in control_resolution.applied
         )
         if has_direct_overrides:
-            return (
-                f"Preset '{control_resolution.preset}' applied with overrides: "
-                f"{control_resolution.resolved_igv}"
-            )
-        return f"Preset '{control_resolution.preset}' applied: {control_resolution.resolved_igv}"
+            return f"Preset '{control_resolution.preset}' applied with overrides: {rendered}"
+        return f"Preset '{control_resolution.preset}' applied: {rendered}"
 
-    return f"IGV parameters updated: {control_resolution.resolved_igv}"
+    return f"IGV parameters updated: {rendered}"
 
 
 class RegionRequest(BaseModel):
@@ -331,11 +358,17 @@ def chat(request: ChatRequest) -> ChatResponse:
             control_resolution=typed_control_resolution,
             bam_tracks=result.get("bam_tracks", []),
             per_track_results=result.get("per_track_results", {}),
+            per_track_variant_assessments=result.get("per_track_variant_assessments", {}),
         )
     except ContractError as exc:
         if DEBUG:
             print(f"[DEBUG] ContractError: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InternalControlResolutionError as exc:
+        # Internal schema drift — do not echo pydantic field details to clients.
+        if DEBUG:
+            print(f"[DEBUG] InternalControlResolutionError: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         if DEBUG:
             print(f"[DEBUG] Exception: {exc}")
